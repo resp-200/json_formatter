@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+dist/
+.swiftpm/
+DerivedData/
+
+.claude/
+.trellis/
+AGENTS.md
