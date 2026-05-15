@@ -50,6 +50,13 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
             formatJSON()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .formatExternalJSONRequested)) { notification in
+            guard let text = notification.object as? String else {
+                return
+            }
+            inputText = text
+            formatJSON()
+        }
     }
 
     private func editor(title: String, text: Binding<String>) -> some View {

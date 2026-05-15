@@ -26,6 +26,17 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <string>JSON Formatter</string>
     <key>CFBundleDisplayName</key>
     <string>JSON Formatter</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>JSON Formatter URL</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>jsonformatter</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
