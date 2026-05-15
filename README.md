@@ -1,0 +1,2 @@
+# json_formatter
+macos下的一款json自动格式化的app
