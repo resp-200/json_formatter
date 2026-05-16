@@ -34,6 +34,48 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>jsonformatter</string>
+                <string>json-formatter</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>JSON File</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>json</string>
+                <string>jsonc</string>
+                <string>geojson</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.json</string>
+                <string>public.text</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Format JSON</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>openSelection</string>
+            <key>NSPortName</key>
+            <string>JSON Formatter</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+                <string>public.utf8-plain-text</string>
             </array>
         </dict>
     </array>

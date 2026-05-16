@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @ObservedObject var externalInputStore: ExternalJSONInputStore
     @State private var inputText = ""
     @State private var outputText = ""
     @State private var errorMessage = ""
@@ -11,8 +12,12 @@ struct ContentView: View {
             Text("JSON 格式化工具")
                 .font(.largeTitle.bold())
 
-            Text("粘贴 JSON 后按 Cmd+Enter 格式化，或使用下方按钮。")
+            Text("粘贴 JSON 后按 Cmd+Enter 格式化；系统入口可使用 URL Scheme、JSON 文件打开，或复制 JSON 后启动/重新打开 App 自动格式化。")
                 .foregroundStyle(.secondary)
+
+            if let clipboardText = externalInputStore.clipboardTextToOffer {
+                clipboardImportBanner(clipboardText)
+            }
 
             HStack(spacing: 10) {
                 Button("格式化") {
@@ -50,13 +55,34 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
             formatJSON()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .formatExternalJSONRequested)) { notification in
-            guard let text = notification.object as? String else {
+        .onChange(of: externalInputStore.pendingFormatRequest, initial: true) { _, request in
+            guard let request else {
                 return
             }
-            inputText = text
-            formatJSON()
+            acceptExternalJSON(request)
         }
+    }
+
+    private func clipboardImportBanner(_ clipboardText: String) -> some View {
+        HStack(spacing: 10) {
+            Text("检测到剪贴板文本，可作为 JSON 输入。")
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button("格式化剪贴板") {
+                inputText = clipboardText
+                externalInputStore.clearClipboardOffer()
+                formatJSON()
+            }
+
+            Button("忽略") {
+                externalInputStore.clearClipboardOffer()
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func editor(title: String, text: Binding<String>) -> some View {
@@ -89,6 +115,13 @@ struct ContentView: View {
         } catch {
             errorMessage = "JSON 解析失败：\(error.localizedDescription)"
         }
+    }
+
+    private func acceptExternalJSON(_ request: ExternalJSONInputRequest) {
+        inputText = request.text
+        externalInputStore.clearClipboardOffer()
+        formatJSON()
+        externalInputStore.markFormatRequestHandled(request)
     }
 
     private func copyOutput() {

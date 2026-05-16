@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "JSONFormatterApp",
             path: "Sources/JSONFormatterApp"
+        ),
+        .testTarget(
+            name: "JSONFormatterAppTests",
+            dependencies: ["JSONFormatterApp"],
+            path: "Tests/JSONFormatterAppTests"
         )
     ]
 )
