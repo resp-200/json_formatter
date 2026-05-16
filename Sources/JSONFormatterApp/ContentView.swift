@@ -12,15 +12,18 @@ struct ContentView: View {
     @State private var isSearchVisible = false
     @State private var searchQuery = ""
     @State private var currentMatchIndex = 0
+    @State private var outputMatchRanges: [NSRange] = []
+    @State private var isOutputSearchSkippedForSize = false
+    @State private var outputRenderRevision = 0
+    @State private var outputScrollRevision = 0
+    @State private var outputLineIndex = OutputLineIndex.empty
+    @State private var activeTransformID: UUID?
+    @State private var isTransforming = false
     @State private var keyDownMonitor: Any?
 
     @FocusState private var isSearchFocused: Bool
 
     private let logger = Logger(subsystem: "local.json-formatter.app", category: "ContentView")
-
-    private var outputMatchRanges: [NSRange] {
-        searchRanges(in: outputText, query: searchQuery)
-    }
 
     private var safeCurrentMatchIndex: Int {
         guard !outputMatchRanges.isEmpty else {
@@ -61,32 +64,47 @@ struct ContentView: View {
             }
 
             HStack(spacing: 10) {
-                Button("格式化") {
+                Button(isTransforming ? "处理中..." : "格式化") {
                     formatJSON()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(isTransforming)
 
                 Button("压缩") {
                     compactJSON()
                 }
+                .disabled(isTransforming)
 
                 Button("复制结果") {
                     copyOutput()
                 }
-                .disabled(outputText.isEmpty)
+                .disabled(outputText.isEmpty || isTransforming)
 
                 Button("搜索输出") {
                     openSearch()
                 }
+                .disabled(outputText.isEmpty || isTransforming)
 
                 Button("清空") {
                     clearAll()
                 }
-                .disabled(inputText.isEmpty && outputText.isEmpty && errorMessage.isEmpty && searchQuery.isEmpty)
+                .disabled(inputText.isEmpty && outputText.isEmpty && errorMessage.isEmpty && searchQuery.isEmpty && !isTransforming)
             }
 
             if isSearchVisible {
                 outputSearchBar(matchCount: outputMatchRanges.count)
+            }
+
+            if isTransforming {
+                ProgressView("正在本地处理 JSON...")
+                    .controlSize(.small)
+            }
+
+            if outputLineIndex.isVirtualized {
+                Text("大文件模式：右侧输出按可视区域懒加载，已暂停高亮和全文搜索；复制结果仍会复制完整 JSON。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -107,10 +125,10 @@ struct ContentView: View {
         .onAppear(perform: installFindShortcutMonitor)
         .onDisappear(perform: removeFindShortcutMonitor)
         .onChange(of: searchQuery) { _, _ in
-            currentMatchIndex = 0
+            refreshSearchMatches()
         }
         .onChange(of: outputText) { _, _ in
-            currentMatchIndex = 0
+            refreshSearchMatches()
         }
         .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
             formatJSON()
@@ -168,8 +186,14 @@ struct ContentView: View {
             Text(title)
                 .font(.headline)
             HighlightedOutputView(
-                attributedText: attributedOutputText(),
-                currentMatchRange: currentMatchRange
+                outputText: outputText,
+                lineIndex: outputLineIndex,
+                isDarkMode: isDarkMode,
+                matchRanges: outputMatchRanges,
+                currentMatchIndex: safeCurrentMatchIndex,
+                currentMatchRange: currentMatchRange,
+                renderRevision: outputRenderRevision,
+                scrollRevision: outputScrollRevision
             )
             .background(Color(nsColor: .textBackgroundColor))
             .overlay(
@@ -197,12 +221,12 @@ struct ContentView: View {
             Button("上一个") {
                 selectPreviousMatch(matchCount: matchCount)
             }
-            .disabled(matchCount == 0)
+            .disabled(matchCount == 0 || isOutputSearchSkippedForSize)
 
             Button("下一个") {
                 selectNextMatch(matchCount: matchCount)
             }
-            .disabled(matchCount == 0)
+            .disabled(matchCount == 0 || isOutputSearchSkippedForSize)
 
             Button("关闭") {
                 closeSearch()
@@ -218,15 +242,46 @@ struct ContentView: View {
         transformInput(actionName: "压缩", JSONFormatterService.compact)
     }
 
-    private func transformInput(actionName: String, _ transform: (String) throws -> String) {
-        logger.info("开始执行 JSON \(actionName, privacy: .public)，输入长度 \(inputText.count, privacy: .public)")
-        do {
-            outputText = try transform(inputText)
-            errorMessage = ""
-            logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(outputText.count, privacy: .public)")
-        } catch {
-            errorMessage = "JSON 解析失败：\(error.localizedDescription)"
-            logger.error("JSON \(actionName, privacy: .public) 失败，输入长度 \(inputText.count, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
+    private func transformInput(actionName: String, _ transform: @escaping @Sendable (String) throws -> String) {
+        let input = inputText
+        let transformID = UUID()
+        activeTransformID = transformID
+        isTransforming = true
+        errorMessage = ""
+        logger.info("开始执行 JSON \(actionName, privacy: .public)，输入长度 \(input.count, privacy: .public)")
+
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                let output = try transform(input)
+                return OutputTransformResult(
+                    text: output,
+                    lineIndex: OutputLineIndex(text: output)
+                )
+            }
+
+            await MainActor.run {
+                guard activeTransformID == transformID else {
+                    logger.info("忽略已过期的 JSON \(actionName, privacy: .public) 结果")
+                    return
+                }
+
+                isTransforming = false
+                activeTransformID = nil
+
+                switch result {
+                case .success(let output):
+                    currentMatchIndex = 0
+                    outputMatchRanges = []
+                    outputLineIndex = output.lineIndex
+                    isOutputSearchSkippedForSize = output.lineIndex.isVirtualized
+                    outputText = output.text
+                    outputRenderRevision += 1
+                    logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(output.text.count, privacy: .public)，大文件虚拟化 \(output.lineIndex.isVirtualized, privacy: .public)")
+                case .failure(let error):
+                    errorMessage = "JSON 解析失败：\(error.localizedDescription)"
+                    logger.error("JSON \(actionName, privacy: .public) 失败，输入长度 \(input.count, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
     }
 
@@ -249,11 +304,21 @@ struct ContentView: View {
         errorMessage = ""
         searchQuery = ""
         currentMatchIndex = 0
+        outputMatchRanges = []
+        isOutputSearchSkippedForSize = false
+        outputLineIndex = .empty
+        activeTransformID = nil
+        isTransforming = false
+        outputRenderRevision += 1
+        outputScrollRevision += 1
         logger.info("清空 JSON 输入输出内容成功")
     }
 
     private func openSearch() {
         isSearchVisible = true
+        if outputLineIndex.isVirtualized {
+            isOutputSearchSkippedForSize = true
+        }
         DispatchQueue.main.async {
             isSearchFocused = true
         }
@@ -263,6 +328,8 @@ struct ContentView: View {
         isSearchVisible = false
         searchQuery = ""
         currentMatchIndex = 0
+        outputMatchRanges = []
+        isOutputSearchSkippedForSize = false
     }
 
     private func selectPreviousMatch(matchCount: Int) {
@@ -271,6 +338,7 @@ struct ContentView: View {
         }
 
         currentMatchIndex = (safeCurrentMatchIndex + matchCount - 1) % matchCount
+        outputScrollRevision += 1
     }
 
     private func selectNextMatch(matchCount: Int) {
@@ -279,11 +347,16 @@ struct ContentView: View {
         }
 
         currentMatchIndex = (safeCurrentMatchIndex + 1) % matchCount
+        outputScrollRevision += 1
     }
 
     private func searchStatusText(matchCount: Int) -> String {
         guard !searchQuery.isEmpty else {
             return "输入关键词"
+        }
+
+        if isOutputSearchSkippedForSize {
+            return "输出过大，搜索已暂停"
         }
 
         guard matchCount > 0 else {
@@ -293,18 +366,30 @@ struct ContentView: View {
         return "\(safeCurrentMatchIndex + 1) / \(matchCount)"
     }
 
+    private func refreshSearchMatches() {
+        currentMatchIndex = 0
+        outputScrollRevision += 1
+
+        guard !searchQuery.isEmpty else {
+            outputMatchRanges = []
+            isOutputSearchSkippedForSize = false
+            return
+        }
+
+        guard !outputLineIndex.isVirtualized, outputText.utf8.count <= OutputRenderingPolicy.maxSearchableBytes else {
+            outputMatchRanges = []
+            isOutputSearchSkippedForSize = true
+            logger.info("跳过大 JSON 输出搜索，输出字节数 \(outputText.utf8.count, privacy: .public)，大文件虚拟化 \(outputLineIndex.isVirtualized, privacy: .public)")
+            return
+        }
+
+        isOutputSearchSkippedForSize = false
+        outputMatchRanges = searchRanges(in: outputText, query: searchQuery)
+    }
+
     private func toggleColorScheme() {
         isDarkMode.toggle()
         logger.info("切换 JSON Formatter 主题，当前为 \(isDarkMode ? "黑夜模式" : "日间模式", privacy: .public)")
-    }
-
-    private func attributedOutputText() -> NSAttributedString {
-        buildHighlightedJSONText(
-            outputText,
-            isDarkMode: isDarkMode,
-            matchRanges: outputMatchRanges,
-            currentMatchIndex: safeCurrentMatchIndex
-        )
     }
 
     private func installFindShortcutMonitor() {
@@ -337,15 +422,26 @@ struct ContentView: View {
 }
 
 private struct HighlightedOutputView: NSViewRepresentable {
-    let attributedText: NSAttributedString
+    let outputText: String
+    let lineIndex: OutputLineIndex
+    let isDarkMode: Bool
+    let matchRanges: [NSRange]
+    let currentMatchIndex: Int
     let currentMatchRange: NSRange?
+    let renderRevision: Int
+    let scrollRevision: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = VirtualizedOutputScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
+        scrollView.outputCoordinator = context.coordinator
 
         let textView = NSTextView()
         textView.isEditable = false
@@ -374,13 +470,199 @@ private struct HighlightedOutputView: NSViewRepresentable {
             return
         }
 
-        if !textView.attributedString().isEqual(to: attributedText) {
-            textView.textStorage?.setAttributedString(attributedText)
+        if let virtualizedScrollView = scrollView as? VirtualizedOutputScrollView {
+            virtualizedScrollView.outputCoordinator = context.coordinator
         }
 
-        if let currentMatchRange {
+        context.coordinator.configure(
+            textView: textView,
+            scrollView: scrollView,
+            outputText: outputText,
+            lineIndex: lineIndex,
+            isDarkMode: isDarkMode,
+            matchRanges: matchRanges,
+            currentMatchIndex: currentMatchIndex
+        )
+
+        let usesPlainRendering = outputText.utf8.count > OutputRenderingPolicy.maxHighlightedBytes
+        let usesVirtualizedRendering = lineIndex.isVirtualized
+        let shouldUpdateText: Bool
+        if usesVirtualizedRendering {
+            shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
+                || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+        } else if usesPlainRendering {
+            shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
+                || context.coordinator.lastUsesPlainRendering != usesPlainRendering
+                || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+        } else {
+            shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
+                || context.coordinator.lastUsesPlainRendering != usesPlainRendering
+                || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+                || context.coordinator.lastIsDarkMode != isDarkMode
+                || context.coordinator.lastMatchRanges != matchRanges
+                || context.coordinator.lastCurrentMatchIndex != currentMatchIndex
+        }
+
+        if shouldUpdateText {
+            applyOutputText(to: textView, scrollView: scrollView, usesPlainRendering: usesPlainRendering, usesVirtualizedRendering: usesVirtualizedRendering, coordinator: context.coordinator)
+            context.coordinator.lastRenderRevision = renderRevision
+            context.coordinator.lastUsesPlainRendering = usesPlainRendering
+            context.coordinator.lastUsesVirtualizedRendering = usesVirtualizedRendering
+            context.coordinator.lastIsDarkMode = isDarkMode
+            context.coordinator.lastMatchRanges = matchRanges
+            context.coordinator.lastCurrentMatchIndex = currentMatchIndex
+        }
+
+        guard context.coordinator.lastScrollRevision != scrollRevision else {
+            return
+        }
+
+        context.coordinator.lastScrollRevision = scrollRevision
+        if let currentMatchRange, !usesVirtualizedRendering {
             textView.scrollRangeToVisible(currentMatchRange)
         }
+    }
+
+    private func applyOutputText(
+        to textView: NSTextView,
+        scrollView: NSScrollView,
+        usesPlainRendering: Bool,
+        usesVirtualizedRendering: Bool,
+        coordinator: Coordinator
+    ) {
+        if usesVirtualizedRendering {
+            // 大 JSON 不把全文塞入 NSTextView，避免一次性文本布局导致右侧滚动卡顿。
+            coordinator.resetVirtualizedRendering(scrollView: scrollView)
+            return
+        }
+
+        coordinator.disableVirtualizedRendering()
+
+        // 大 JSON 全量逐字符高亮会在主线程产生大量属性写入，降级为纯文本保证滚动和选择流畅。
+        if usesPlainRendering {
+            textView.string = outputText
+            textView.textColor = .labelColor
+            textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            return
+        }
+
+        let attributedText = buildHighlightedJSONText(
+            outputText,
+            isDarkMode: isDarkMode,
+            matchRanges: matchRanges,
+            currentMatchIndex: currentMatchIndex
+        )
+        textView.textStorage?.setAttributedString(attributedText)
+    }
+
+    @MainActor final class Coordinator {
+        weak var textView: NSTextView?
+        weak var scrollView: NSScrollView?
+        var outputText = ""
+        var lineIndex = OutputLineIndex.empty
+        var isDarkMode = false
+        var matchRanges: [NSRange] = []
+        var currentMatchIndex = 0
+        var lastRenderRevision = -1
+        var lastScrollRevision = -1
+        var lastUsesPlainRendering = false
+        var lastUsesVirtualizedRendering = false
+        var lastIsDarkMode = false
+        var lastMatchRanges: [NSRange] = []
+        var lastCurrentMatchIndex = 0
+        var renderedChunkIndex = 0
+        var isUpdatingVirtualizedContent = false
+
+        func configure(
+            textView: NSTextView,
+            scrollView: NSScrollView,
+            outputText: String,
+            lineIndex: OutputLineIndex,
+            isDarkMode: Bool,
+            matchRanges: [NSRange],
+            currentMatchIndex: Int
+        ) {
+            self.textView = textView
+            self.scrollView = scrollView
+            self.outputText = outputText
+            self.lineIndex = lineIndex
+            self.isDarkMode = isDarkMode
+            self.matchRanges = matchRanges
+            self.currentMatchIndex = currentMatchIndex
+        }
+
+        func resetVirtualizedRendering(scrollView: NSScrollView) {
+            renderedChunkIndex = 0
+            scrollView.contentView.scroll(to: .zero)
+            appendVirtualizedLinesIfNeeded(force: true)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+
+        func disableVirtualizedRendering() {
+            renderedChunkIndex = 0
+            scrollView?.contentView.postsBoundsChangedNotifications = false
+        }
+
+        func scrollViewDidScroll(_ scrollView: NSScrollView) {
+            guard lineIndex.isVirtualized, !isUpdatingVirtualizedContent else {
+                return
+            }
+
+            let contentHeight = scrollView.documentView?.bounds.height ?? 0
+            if scrollView.documentVisibleRect.maxY + OutputRenderingPolicy.virtualizedAppendPreloadHeight >= contentHeight {
+                appendVirtualizedLinesIfNeeded(force: false)
+            }
+        }
+
+        private func appendVirtualizedLinesIfNeeded(force: Bool) {
+            guard lineIndex.isVirtualized, let textView, let scrollView, renderedChunkIndex < lineIndex.chunkCount else {
+                return
+            }
+
+            let chunkStartIndex = renderedChunkIndex
+            let chunkBatchSize = force
+                ? OutputRenderingPolicy.virtualizedInitialChunks
+                : OutputRenderingPolicy.virtualizedAppendChunks
+            let chunkEndIndex = min(chunkStartIndex + chunkBatchSize, lineIndex.chunkCount)
+            let chunk = lineIndex.textWindow(
+                in: outputText,
+                startChunk: chunkStartIndex,
+                chunkCount: chunkEndIndex - chunkStartIndex
+            )
+            let loadedLineCount = lineIndex.loadedLineCount(upToChunk: chunkEndIndex)
+            let prefix = chunkStartIndex == 0
+                ? "大文件模式：已加载前 \(loadedLineCount) 行 / 共 \(lineIndex.lineCount) 行，继续向下滚动会加载后续内容。\n\n"
+                : ""
+
+            isUpdatingVirtualizedContent = true
+            if chunkStartIndex == 0 {
+                textView.string = prefix + chunk
+                textView.textColor = .labelColor
+                textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            } else {
+                textView.textStorage?.append(NSAttributedString(
+                    string: prefix + chunk,
+                    attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+                        .foregroundColor: NSColor.labelColor
+                    ]
+                ))
+            }
+            renderedChunkIndex = chunkEndIndex
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            isUpdatingVirtualizedContent = false
+        }
+    }
+}
+
+@MainActor
+private final class VirtualizedOutputScrollView: NSScrollView {
+    weak var outputCoordinator: HighlightedOutputView.Coordinator?
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        outputCoordinator?.scrollViewDidScroll(self)
     }
 }
 
@@ -393,7 +675,7 @@ private func searchRanges(in text: String, query: String) -> [NSRange] {
     var ranges: [NSRange] = []
     var searchRange = NSRange(location: 0, length: nsText.length)
 
-    while searchRange.location < nsText.length {
+    while searchRange.location < nsText.length && ranges.count < OutputRenderingPolicy.maxSearchMatches {
         let foundRange = nsText.range(
             of: query,
             options: [.caseInsensitive, .diacriticInsensitive],
@@ -415,6 +697,135 @@ private func searchRanges(in text: String, query: String) -> [NSRange] {
     }
 
     return ranges
+}
+
+private struct OutputTransformResult: Sendable {
+    let text: String
+    let lineIndex: OutputLineIndex
+}
+
+private struct OutputLineIndex: Equatable, Sendable {
+    static let empty = OutputLineIndex(
+        chunkStartUTF16Offsets: [0],
+        chunkStartLineNumbers: [0],
+        lineCount: 1,
+        totalUTF16Length: 0,
+        totalBytes: 0
+    )
+
+    let chunkStartUTF16Offsets: [Int]
+    let chunkStartLineNumbers: [Int]
+    let lineCount: Int
+    let totalUTF16Length: Int
+    let totalBytes: Int
+
+    var chunkCount: Int {
+        max(chunkStartUTF16Offsets.count, 1)
+    }
+
+    var isVirtualized: Bool {
+        totalBytes > OutputRenderingPolicy.maxVirtualizedBytes || lineCount > OutputRenderingPolicy.maxVirtualizedLines
+    }
+
+    init(text: String) {
+        totalUTF16Length = text.utf16.count
+        totalBytes = text.utf8.count
+
+        guard !text.isEmpty else {
+            chunkStartUTF16Offsets = [0]
+            chunkStartLineNumbers = [0]
+            lineCount = 1
+            return
+        }
+
+        var offsets: [Int] = [0]
+        var lineNumbers: [Int] = [0]
+        offsets.reserveCapacity(min(1_000, max(text.utf8.count / OutputRenderingPolicy.virtualizedMaxChunkUTF16Length, 1)))
+        lineNumbers.reserveCapacity(offsets.capacity)
+
+        var utf16Offset = 0
+        var currentLineNumber = 0
+        var currentChunkStartUTF16 = 0
+        var currentChunkStartLineNumber = 0
+
+        for character in text {
+            utf16Offset += character.utf16.count
+            if character == "\n" {
+                currentLineNumber += 1
+            }
+
+            guard utf16Offset < totalUTF16Length else {
+                continue
+            }
+
+            let chunkLineSpan = currentLineNumber - currentChunkStartLineNumber
+            let chunkUTF16Length = utf16Offset - currentChunkStartUTF16
+            if chunkLineSpan >= OutputRenderingPolicy.virtualizedChunkLines
+                || chunkUTF16Length >= OutputRenderingPolicy.virtualizedMaxChunkUTF16Length {
+                offsets.append(utf16Offset)
+                lineNumbers.append(currentLineNumber)
+                currentChunkStartUTF16 = utf16Offset
+                currentChunkStartLineNumber = currentLineNumber
+            }
+        }
+
+        chunkStartUTF16Offsets = offsets
+        chunkStartLineNumbers = lineNumbers
+        lineCount = max(currentLineNumber + 1, 1)
+    }
+
+    private init(
+        chunkStartUTF16Offsets: [Int],
+        chunkStartLineNumbers: [Int],
+        lineCount: Int,
+        totalUTF16Length: Int,
+        totalBytes: Int
+    ) {
+        self.chunkStartUTF16Offsets = chunkStartUTF16Offsets
+        self.chunkStartLineNumbers = chunkStartLineNumbers
+        self.lineCount = lineCount
+        self.totalUTF16Length = totalUTF16Length
+        self.totalBytes = totalBytes
+    }
+
+    func loadedLineCount(upToChunk chunkIndex: Int) -> Int {
+        guard chunkIndex < chunkStartLineNumbers.count else {
+            return lineCount
+        }
+
+        return max(chunkStartLineNumbers[max(chunkIndex, 0)], 1)
+    }
+
+    func textWindow(in text: String, startChunk: Int, chunkCount: Int) -> String {
+        guard !text.isEmpty else {
+            return ""
+        }
+
+        let safeStartChunk = min(max(startChunk, 0), max(self.chunkCount - 1, 0))
+        let safeEndChunk = min(safeStartChunk + max(chunkCount, 0), self.chunkCount)
+        let startUTF16 = chunkStartUTF16Offsets[safeStartChunk]
+        let endUTF16 = safeEndChunk < chunkStartUTF16Offsets.count ? chunkStartUTF16Offsets[safeEndChunk] : totalUTF16Length
+        let length = max(endUTF16 - startUTF16, 0)
+        guard length > 0 else {
+            return ""
+        }
+
+        let nsText = text as NSString
+        return nsText.substring(with: NSRange(location: startUTF16, length: length))
+    }
+}
+
+private enum OutputRenderingPolicy {
+    static let maxHighlightedBytes = 300_000
+    static let maxSearchableBytes = 1_000_000
+    static let maxSearchMatches = 2_000
+    static let maxVirtualizedBytes = 1_500_000
+    static let maxVirtualizedLines = 20_000
+    static let virtualizedChunkLines = 300
+    static let virtualizedMaxChunkUTF16Length = 80_000
+    static let virtualizedInitialChunks = 4
+    static let virtualizedAppendChunks = 3
+    static let virtualizedAppendPreloadHeight: CGFloat = 1_400
 }
 
 private func buildHighlightedJSONText(
