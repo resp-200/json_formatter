@@ -24,6 +24,11 @@ struct JSONFormatterApp: App {
                     NotificationCenter.default.post(name: .formatJSONRequested, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
+
+                Button("搜索输出 JSON") {
+                    NotificationCenter.default.post(name: .findOutputRequested, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
             }
         }
     }
@@ -173,4 +178,5 @@ final class ExternalJSONInputStore: ObservableObject {
 
 extension Notification.Name {
     static let formatJSONRequested = Notification.Name("formatJSONRequested")
+    static let findOutputRequested = Notification.Name("findOutputRequested")
 }
