@@ -185,6 +185,9 @@ struct ContentView: View {
             TextField("搜索输出 JSON", text: $searchQuery)
                 .textFieldStyle(.roundedBorder)
                 .focused($isSearchFocused)
+                .onSubmit {
+                    selectNextMatch(matchCount: matchCount)
+                }
                 .frame(width: 260)
 
             Text(searchStatusText(matchCount: matchCount))
