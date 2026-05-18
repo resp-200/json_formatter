@@ -10,6 +10,15 @@ macOS 下的一款本地 JSON 格式化 App。
 - JSON 解析失败时展示错误提示
 - 支持通过 URL Scheme、启动参数、JSON 文件、系统 Services/剪贴板入口传入 JSON 并自动格式化
 
+## 效果图
+
+使用聚焦搜索快速打开json文件
+<img width="640" height="467" alt="Clipboard_Screenshot_1779088658" src="https://github.com/user-attachments/assets/08c5e82c-4b44-4e5d-a155-fc8ab19a52e0" />
+
+不同层级使用不同颜色展示，支持关键字搜索
+<img width="900" height="672" alt="Clipboard_Screenshot_1779088750" src="https://github.com/user-attachments/assets/068d9951-34c9-4af0-91b4-ea5fcb5a9642" />
+
+
 ## 构建
 
 ```bash
