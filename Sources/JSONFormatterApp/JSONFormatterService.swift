@@ -9,6 +9,18 @@ public enum JSONFormatterService {
         try transform(input, options: [.sortedKeys, .fragmentsAllowed])
     }
 
+    public static func escape(_ input: String) throws -> String {
+        // 先复用压缩入口完成 JSON 校验，再编码成可直接粘贴的 JSON 字符串。
+        let compactedJSON = try compact(input)
+        let outputData = try JSONSerialization.data(withJSONObject: compactedJSON, options: [.fragmentsAllowed])
+
+        guard let output = String(data: outputData, encoding: .utf8) else {
+            throw JSONFormatterError.encodingFailed
+        }
+
+        return output
+    }
+
     private static func transform(_ input: String, options: JSONSerialization.WritingOptions) throws -> String {
         do {
             return try transformStrict(input, options: options)

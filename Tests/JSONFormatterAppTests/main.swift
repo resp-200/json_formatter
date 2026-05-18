@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import JSONFormatterApp
 
@@ -13,6 +14,35 @@ import Testing
     let output = try JSONFormatterService.compact("{\n  \"b\" : 2,\n  \"a\" : 1\n}")
 
     #expect(output == "{\"a\":1,\"b\":2}")
+}
+
+@Test func escapeObjectJSON() throws {
+    let output = try JSONFormatterService.escape("{\n  \"b\" : 2,\n  \"a\" : \"hello\"\n}")
+
+    #expect(output == "\"{\\\"a\\\":\\\"hello\\\",\\\"b\\\":2}\"")
+}
+
+@Test func escapedObjectJSONCanDecodeBackToCompactedJSONString() throws {
+    let output = try JSONFormatterService.escape("{\"text\":\"line1\\nline2\",\"quote\":\"\\\"hi\\\"\"}")
+    let data = try #require(output.data(using: .utf8))
+    let decoded = try #require(JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String)
+
+    #expect(decoded == "{\"quote\":\"\\\"hi\\\"\",\"text\":\"line1\\nline2\"}")
+}
+
+@Test func escapeRejectsInvalidJSON() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.escape("{bad json}")
+    }
+}
+
+@Test func releaseVersionCheckerDetectsNewerSemverTag() {
+    #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.2"))
+    #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "1.1.0"))
+    #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "v1.0.1", latestTagName: "v1.0.2"))
+    #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.1"))
+    #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.0"))
+    #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "开发版", latestTagName: "v1.0.2"))
 }
 
 @Test func formatUserFeedbackJSONAfterClearingInput() throws {

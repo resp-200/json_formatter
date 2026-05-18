@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var outputLineIndex = OutputLineIndex.empty
     @State private var activeTransformID: UUID?
     @State private var isTransforming = false
+    @State private var latestReleaseInfo: LatestReleaseInfo?
     @State private var keyDownMonitor: Any?
 
     @FocusState private var isSearchFocused: Bool
@@ -41,13 +42,17 @@ struct ContentView: View {
         return outputMatchRanges[safeCurrentMatchIndex]
     }
 
-    private var appVersionText: String {
+    private var currentAppVersion: String {
         let infoDictionary = Bundle.main.infoDictionary
         if let version = infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
-            return "版本 \(version)"
+            return version
         }
 
-        return "版本 开发版"
+        return "开发版"
+    }
+
+    private var appVersionText: String {
+        "版本 \(currentAppVersion)"
     }
 
     var body: some View {
@@ -60,10 +65,28 @@ struct ContentView: View {
                     Text("粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+F 或 Ctrl+F 搜索输出；系统入口支持 URL Scheme、JSON 文件打开和剪贴板自动格式化。")
                         .foregroundStyle(.secondary)
 
-                    Text(appVersionText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    HStack(alignment: .center, spacing: 6) {
+                        Text(appVersionText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+
+                        if latestReleaseInfo != nil {
+                            Button {
+                                openLatestReleasePage()
+                            } label: {
+                                Text("new")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.red)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("发现新版本，点击前往 GitHub Releases 下载")
+                        }
+                    }
                 }
 
                 Spacer()
@@ -86,6 +109,16 @@ struct ContentView: View {
 
                 Button("压缩") {
                     compactJSON()
+                }
+                .disabled(isTransforming)
+
+                Button("转义") {
+                    escapeJSON()
+                }
+                .disabled(isTransforming)
+
+                Button("转义并复制 JSON") {
+                    escapeAndCopyJSON()
                 }
                 .disabled(isTransforming)
 
@@ -136,7 +169,10 @@ struct ContentView: View {
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(isDarkMode ? .dark : .light)
-        .onAppear(perform: installFindShortcutMonitor)
+        .onAppear {
+            installFindShortcutMonitor()
+            checkLatestRelease()
+        }
         .onDisappear(perform: removeFindShortcutMonitor)
         .onChange(of: searchQuery) { _, _ in
             refreshSearchMatches()
@@ -255,7 +291,19 @@ struct ContentView: View {
         transformInput(actionName: "压缩", JSONFormatterService.compact)
     }
 
-    private func transformInput(actionName: String, _ transform: @escaping @Sendable (String) throws -> String) {
+    private func escapeJSON() {
+        transformInput(actionName: "转义", JSONFormatterService.escape)
+    }
+
+    private func escapeAndCopyJSON() {
+        transformInput(actionName: "转义并复制", copyAfterSuccess: true, JSONFormatterService.escape)
+    }
+
+    private func transformInput(
+        actionName: String,
+        copyAfterSuccess: Bool = false,
+        _ transform: @escaping @Sendable (String) throws -> String
+    ) {
         let input = inputText
         let transformID = UUID()
         activeTransformID = transformID
@@ -289,6 +337,9 @@ struct ContentView: View {
                     isOutputSearchSkippedForSize = output.lineIndex.isVirtualized
                     outputText = output.text
                     outputRenderRevision += 1
+                    if copyAfterSuccess {
+                        copyToPasteboard(output.text, actionName: actionName)
+                    }
                     logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(output.text.count, privacy: .public)，大文件虚拟化 \(output.lineIndex.isVirtualized, privacy: .public)")
                 case .failure(let error):
                     errorMessage = "JSON 解析失败：\(error.localizedDescription)"
@@ -306,9 +357,13 @@ struct ContentView: View {
     }
 
     private func copyOutput() {
+        copyToPasteboard(outputText, actionName: "复制结果")
+    }
+
+    private func copyToPasteboard(_ text: String, actionName: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(outputText, forType: .string)
-        logger.info("复制 JSON 输出成功，输出长度 \(outputText.count, privacy: .public)")
+        NSPasteboard.general.setString(text, forType: .string)
+        logger.info("JSON \(actionName, privacy: .public) 写入剪贴板成功，输出长度 \(text.count, privacy: .public)")
     }
 
     private func clearAll() {
@@ -403,6 +458,41 @@ struct ContentView: View {
     private func toggleColorScheme() {
         isDarkMode.toggle()
         logger.info("切换 JSON Formatter 主题，当前为 \(isDarkMode ? "黑夜模式" : "日间模式", privacy: .public)")
+    }
+
+    private func checkLatestRelease() {
+        Task {
+            do {
+                let releaseInfo = try await ReleaseVersionChecker.fetchLatestRelease()
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                let hasNewRelease = ReleaseVersionChecker.isNewerRelease(
+                    currentVersion: currentAppVersion,
+                    latestTagName: releaseInfo.tagName
+                )
+
+                guard hasNewRelease else {
+                    logger.info("GitHub Releases 未发现新版本，当前版本 \(currentAppVersion, privacy: .public)，最新版本 \(releaseInfo.tagName, privacy: .public)")
+                    return
+                }
+
+                await MainActor.run {
+                    latestReleaseInfo = releaseInfo
+                }
+                logger.info("GitHub Releases 发现新版本，当前版本 \(currentAppVersion, privacy: .public)，最新版本 \(releaseInfo.tagName, privacy: .public)")
+            } catch {
+                logger.error("GitHub Releases 新版本检测失败，错误 \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func openLatestReleasePage() {
+        let url = latestReleaseInfo?.htmlURL ?? ReleaseVersionChecker.releasesPageURL
+        logger.info("打开 GitHub Releases 页面，url=\(url.absoluteString, privacy: .public)")
+        NSWorkspace.shared.open(url)
     }
 
     private func installFindShortcutMonitor() {

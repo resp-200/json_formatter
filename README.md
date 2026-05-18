@@ -6,9 +6,10 @@ macOS 下的一款本地 JSON 格式化 App。
 
 - 输入 JSON 后按 `Cmd+Enter` 格式化
 - 普通 `Enter` 保留为换行
-- 支持格式化、压缩、复制结果、清空
+- 支持格式化、压缩、转义、转义并复制 JSON、复制结果、清空
 - JSON 解析失败时展示错误提示
 - 支持通过 URL Scheme、启动参数、JSON 文件、系统 Services/剪贴板入口传入 JSON 并自动格式化
+- 启动后检测 GitHub Releases，新版本会在当前版本号后显示红色 `new` 标签，点击可前往下载
 
 ## 效果图
 
