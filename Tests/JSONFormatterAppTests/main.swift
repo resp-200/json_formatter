@@ -10,6 +10,52 @@ import Testing
     #expect(output.contains("  \"b\" : 2"))
 }
 
+@Test func formatJSONEscapedObjectWithOuterQuotes() throws {
+    let output = try JSONFormatterService.format("\"{\\\"b\\\":2,\\\"a\\\":1}\"")
+
+    #expect(output.contains("\n"))
+    #expect(output.contains("  \"a\" : 1"))
+    #expect(output.contains("  \"b\" : 2"))
+    #expect(!output.contains("\\\\\"a\\\\\""))
+}
+
+@Test func formatJSONEscapedObjectWithoutOuterQuotes() throws {
+    let output = try JSONFormatterService.format("{\\\"b\\\":2,\\\"a\\\":1}")
+
+    #expect(output.contains("\n"))
+    #expect(output.contains("  \"a\" : 1"))
+    #expect(output.contains("  \"b\" : 2"))
+    #expect(!output.contains("\\\\\"a\\\\\""))
+}
+
+@Test func formatJSONEscapedArrayWithOuterQuotes() throws {
+    let output = try JSONFormatterService.format("\"[\\\"b\\\",2,{\\\"a\\\":1}]\"")
+
+    #expect(output.contains("\n"))
+    #expect(output.contains("  \"b\""))
+    #expect(output.contains("    \"a\" : 1"))
+}
+
+@Test func formatJSONEscapedArrayWithoutOuterQuotes() throws {
+    let output = try JSONFormatterService.format("[\\\"b\\\",2,{\\\"a\\\":1}]")
+
+    #expect(output.contains("\n"))
+    #expect(output.contains("  \"b\""))
+    #expect(output.contains("    \"a\" : 1"))
+}
+
+@Test func formatJSONStringWithoutEmbeddedJSONKeepsStringBehavior() throws {
+    let output = try JSONFormatterService.format("\"hello\"")
+
+    #expect(output == "\"hello\"")
+}
+
+@Test func compactDoesNotDecodeEscapedJSONString() throws {
+    let output = try JSONFormatterService.compact("\"{\\\"b\\\":2,\\\"a\\\":1}\"")
+
+    #expect(output == "\"{\\\"b\\\":2,\\\"a\\\":1}\"")
+}
+
 @Test func compactObjectJSON() throws {
     let output = try JSONFormatterService.compact("{\n  \"b\" : 2,\n  \"a\" : 1\n}")
 
