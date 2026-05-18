@@ -41,6 +41,15 @@ struct ContentView: View {
         return outputMatchRanges[safeCurrentMatchIndex]
     }
 
+    private var appVersionText: String {
+        let infoDictionary = Bundle.main.infoDictionary
+        if let version = infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
+            return "版本 \(version)"
+        }
+
+        return "版本 开发版"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
@@ -50,6 +59,11 @@ struct ContentView: View {
 
                     Text("粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+F 或 Ctrl+F 搜索输出；系统入口支持 URL Scheme、JSON 文件打开和剪贴板自动格式化。")
                         .foregroundStyle(.secondary)
+
+                    Text(appVersionText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
 
                 Spacer()
@@ -170,15 +184,14 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.headline)
-            TextEditor(text: text)
-                .font(.system(.body, design: .monospaced))
-                .scrollContentBackground(.hidden)
+            AutoPairingTextEditor(text: text)
                 .background(Color(nsColor: .textBackgroundColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func outputEditor(title: String) -> some View {
@@ -418,6 +431,320 @@ struct ContentView: View {
 
         NSEvent.removeMonitor(keyDownMonitor)
         self.keyDownMonitor = nil
+    }
+}
+
+private struct AutoPairingTextEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let textView = AutoPairingTextView()
+        textView.delegate = context.coordinator
+        textView.autoPairingDelegate = context.coordinator
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.usesFindBar = true
+        textView.drawsBackground = false
+        textView.disableSmartJSONInputSubstitutions()
+        textView.applyPlainJSONInputStyle()
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width, .height]
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.setPlainJSONInputString(text)
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? AutoPairingTextView else {
+            return
+        }
+
+        context.coordinator.text = $text
+        textView.disableSmartJSONInputSubstitutions()
+        textView.applyPlainJSONInputStyle()
+        guard !context.coordinator.isUpdatingFromTextView, textView.string != text else {
+            return
+        }
+
+        let selectedRanges = textView.selectedRanges
+        textView.setPlainJSONInputString(text)
+        textView.selectedRanges = clampedSelectionRanges(
+            selectedRanges,
+            preferredInsertionLocation: textView.string.utf16.count,
+            textLength: (text as NSString).length
+        )
+    }
+
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate, AutoPairingTextViewDelegate {
+        var text: Binding<String>
+        var isUpdatingFromTextView = false
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else {
+                return
+            }
+
+            isUpdatingFromTextView = true
+            text.wrappedValue = textView.string
+            isUpdatingFromTextView = false
+        }
+
+        func insertAutoPair(open: String, close: String, in textView: NSTextView, replacementRange: NSRange) -> Bool {
+            guard let range = effectiveInsertionRange(in: textView, replacementRange: replacementRange) else {
+                return false
+            }
+
+            let currentText = textView.string as NSString
+            let currentTextLength = currentText.length
+            guard range.location != NSNotFound, range.location + range.length <= currentTextLength else {
+                return false
+            }
+
+            if open == close,
+               range.length == 0,
+               range.location < currentTextLength,
+               currentText.substring(with: NSRange(location: range.location, length: 1)) == close {
+                textView.setSelectedRange(NSRange(location: range.location + 1, length: 0))
+                return true
+            }
+
+            let selectedText = currentText.substring(with: range)
+            let replacement = open + selectedText + close
+            let replacementRange = NSRange(location: range.location, length: (replacement as NSString).length)
+            let cursorRange = range.length == 0
+                ? NSRange(location: range.location + (open as NSString).length, length: 0)
+                : replacementRange
+
+            return insertPlainText(replacement, in: textView, range: range, selectedRangeAfterInsert: cursorRange)
+        }
+
+        func insertLiteralSpace(in textView: NSTextView, replacementRange: NSRange) -> Bool {
+            guard let range = effectiveInsertionRange(in: textView, replacementRange: replacementRange) else {
+                return false
+            }
+
+            let cursorRange = NSRange(location: range.location + 1, length: 0)
+            return insertPlainText(" ", in: textView, range: range, selectedRangeAfterInsert: cursorRange)
+        }
+
+        func textView(
+            _ view: NSTextView,
+            willCheckTextIn range: NSRange,
+            options: [NSSpellChecker.OptionKey: Any],
+            types checkingTypes: UnsafeMutablePointer<NSTextCheckingTypes>
+        ) -> [NSSpellChecker.OptionKey: Any] {
+            checkingTypes.pointee = 0
+            return options
+        }
+
+        func textView(
+            _ view: NSTextView,
+            didCheckTextIn range: NSRange,
+            types checkingTypes: NSTextCheckingTypes,
+            options: [NSSpellChecker.OptionKey: Any],
+            results: [NSTextCheckingResult],
+            orthography: NSOrthography,
+            wordCount: Int
+        ) -> [NSTextCheckingResult] {
+            []
+        }
+
+        private func insertPlainText(
+            _ replacement: String,
+            in textView: NSTextView,
+            range: NSRange,
+            selectedRangeAfterInsert: NSRange? = nil
+        ) -> Bool {
+            guard let textStorage = textView.textStorage else {
+                return false
+            }
+
+            guard textView.shouldChangeText(in: range, replacementString: replacement) else {
+                return false
+            }
+
+            let replacementRange = NSRange(location: range.location, length: (replacement as NSString).length)
+            textView.applyPlainJSONInputStyle()
+            textStorage.replaceCharacters(in: range, with: NSAttributedString(
+                string: replacement,
+                attributes: textView.plainJSONInputAttributes
+            ))
+            textView.didChangeText()
+            textView.setSelectedRange(selectedRangeAfterInsert ?? replacementRange)
+            return true
+        }
+
+        private func effectiveInsertionRange(in textView: NSTextView, replacementRange: NSRange) -> NSRange? {
+            let stringLength = (textView.string as NSString).length
+            if let clampedReplacementRange = replacementRange.clamped(toLength: stringLength),
+               replacementRange.location != NSNotFound {
+                return clampedReplacementRange
+            }
+
+            let selectedRange = textView.selectedRange()
+            if let clampedRange = selectedRange.clamped(toLength: stringLength), selectedRange.location != NSNotFound {
+                return clampedRange
+            }
+
+            return NSRange(location: stringLength, length: 0)
+        }
+    }
+
+    private func clampedSelectionRanges(
+        _ ranges: [NSValue],
+        preferredInsertionLocation: Int,
+        textLength: Int
+    ) -> [NSValue] {
+        let clampedRanges = ranges.compactMap { rangeValue -> NSValue? in
+            guard let range = rangeValue.rangeValue.clamped(toLength: textLength) else {
+                return nil
+            }
+            return NSValue(range: range)
+        }
+
+        if !clampedRanges.isEmpty {
+            return clampedRanges
+        }
+
+        let insertionLocation = min(max(preferredInsertionLocation, 0), textLength)
+        return [NSValue(range: NSRange(location: insertionLocation, length: 0))]
+    }
+}
+
+@MainActor
+private protocol AutoPairingTextViewDelegate: AnyObject {
+    func insertAutoPair(open: String, close: String, in textView: NSTextView, replacementRange: NSRange) -> Bool
+    func insertLiteralSpace(in textView: NSTextView, replacementRange: NSRange) -> Bool
+}
+
+@MainActor
+private final class AutoPairingTextView: NSTextView {
+    weak var autoPairingDelegate: AutoPairingTextViewDelegate?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        disableSmartJSONInputSubstitutions()
+        applyPlainJSONInputStyle()
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let didBecomeFirstResponder = super.becomeFirstResponder()
+        disableSmartJSONInputSubstitutions()
+        applyPlainJSONInputStyle()
+        return didBecomeFirstResponder
+    }
+
+    override func didChangeText() {
+        disableSmartJSONInputSubstitutions()
+        applyPlainJSONInputStyle()
+        super.didChangeText()
+    }
+
+    private let autoPairs: [String: String] = [
+        "{": "}",
+        "[": "]",
+        "\"": "\""
+    ]
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        disableSmartJSONInputSubstitutions()
+        applyPlainJSONInputStyle()
+        guard let text = insertString as? String, text.count == 1 else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        if text == " ", autoPairingDelegate?.insertLiteralSpace(in: self, replacementRange: replacementRange) == true {
+            return
+        }
+
+        guard let close = autoPairs[text],
+              autoPairingDelegate?.insertAutoPair(open: text, close: close, in: self, replacementRange: replacementRange) == true else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+    }
+}
+
+private extension NSTextView {
+    var plainJSONInputAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            .foregroundColor: NSColor.labelColor
+        ]
+    }
+
+    func applyPlainJSONInputStyle() {
+        font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textColor = .labelColor
+        insertionPointColor = .labelColor
+        typingAttributes = plainJSONInputAttributes
+        selectedTextAttributes = [
+            .backgroundColor: NSColor.selectedTextBackgroundColor,
+            .foregroundColor: NSColor.selectedTextColor
+        ]
+    }
+
+    func setPlainJSONInputString(_ string: String) {
+        textStorage?.setAttributedString(NSAttributedString(
+            string: string,
+            attributes: plainJSONInputAttributes
+        ))
+        applyPlainJSONInputStyle()
+    }
+
+    func disableSmartJSONInputSubstitutions() {
+        isAutomaticQuoteSubstitutionEnabled = false
+        isAutomaticDashSubstitutionEnabled = false
+        isAutomaticTextReplacementEnabled = false
+        isAutomaticSpellingCorrectionEnabled = false
+        isAutomaticTextCompletionEnabled = false
+        isAutomaticLinkDetectionEnabled = false
+        isAutomaticDataDetectionEnabled = false
+        isContinuousSpellCheckingEnabled = false
+        smartInsertDeleteEnabled = false
+        enabledTextCheckingTypes = 0
+    }
+}
+
+private extension NSRange {
+    func clamped(toLength length: Int) -> NSRange? {
+        guard location != NSNotFound else {
+            return nil
+        }
+
+        let safeLocation = min(max(location, 0), length)
+        let safeEnd = min(max(location + self.length, safeLocation), length)
+        return NSRange(location: safeLocation, length: safeEnd - safeLocation)
     }
 }
 
