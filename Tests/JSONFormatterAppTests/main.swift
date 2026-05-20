@@ -155,18 +155,79 @@ import Testing
     #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.2"))
     #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "1.1.0"))
     #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "v1.0.1", latestTagName: "v1.0.2"))
+    #expect(ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.2-beta"))
     #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.1"))
     #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "1.0.1", latestTagName: "v1.0.0"))
     #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "开发版", latestTagName: "v1.0.2"))
 }
 
+@Test func releaseVersionCheckerParsesLatestManifest() throws {
+    let manifestJSON = """
+    {"version":"1.0.5","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5"}
+    """
+    let data = try #require(manifestJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestManifestReleaseInfo(from: data)
+
+    #expect(releaseInfo.tagName == "1.0.5")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.5")
+}
+
+@Test func releaseVersionCheckerManifestFallsBackToReleasesPageWithoutURL() throws {
+    let manifestJSON = """
+    {"version":"v1.0.5"}
+    """
+    let data = try #require(manifestJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestManifestReleaseInfo(from: data)
+
+    #expect(releaseInfo.tagName == "v1.0.5")
+    #expect(releaseInfo.htmlURL == ReleaseVersionChecker.releasesPageURL)
+}
+
+@Test func releaseVersionCheckerUsesManifestBeforeFallbackData() throws {
+    let manifestJSON = """
+    {"version":"1.0.5","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5"}
+    """
+    let releasesJSON = """
+    [
+      {"tag_name":"v9.0.0","html_url":"https://github.com/resp-200/json_formatter/releases","draft":false,"prerelease":false}
+    ]
+    """
+    let manifestData = try #require(manifestJSON.data(using: .utf8))
+    let releasesData = try #require(releasesJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(manifestData: manifestData, fallbackReleasesData: releasesData)
+
+    #expect(releaseInfo.tagName == "1.0.5")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.5")
+}
+
+@Test func releaseVersionCheckerFallsBackWhenManifestInvalid() throws {
+    let manifestJSON = """
+    {"version":"开发版","url":"https://github.com/resp-200/json_formatter/releases/tag/dev"}
+    """
+    let releasesJSON = """
+    [
+      {"tag_name":"v1.0.6","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6","draft":false,"prerelease":false}
+    ]
+    """
+    let manifestData = try #require(manifestJSON.data(using: .utf8))
+    let releasesData = try #require(releasesJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(manifestData: manifestData, fallbackReleasesData: releasesData)
+
+    #expect(releaseInfo.tagName == "v1.0.6")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
+}
+
 @Test func releaseVersionCheckerSelectsHighestStableReleaseFromList() throws {
     let releasesJSON = """
     [
-      {"tag_name":"v1.0.3","html_url":"https://example.com/v1.0.3","draft":false,"prerelease":false},
-      {"tag_name":"v1.0.5-beta","html_url":"https://example.com/v1.0.5-beta","draft":false,"prerelease":true},
-      {"tag_name":"v1.0.4","html_url":"https://example.com/v1.0.4","draft":false,"prerelease":false},
-      {"tag_name":"v1.0.6","html_url":"https://example.com/v1.0.6","draft":true,"prerelease":false}
+      {"tag_name":"v1.0.3","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.3","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.5-beta","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5-beta","draft":false,"prerelease":true},
+      {"tag_name":"v1.0.4","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.4","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.6","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6","draft":true,"prerelease":false}
     ]
     """
     let data = try #require(releasesJSON.data(using: .utf8))
@@ -174,15 +235,15 @@ import Testing
     let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(from: data)
 
     #expect(releaseInfo.tagName == "v1.0.4")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://example.com/v1.0.4")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.4")
 }
 
 @Test func releaseVersionCheckerHandlesUnorderedReleaseList() throws {
     let releasesJSON = """
     [
-      {"tag_name":"v1.0.2","html_url":"https://example.com/v1.0.2","draft":false,"prerelease":false},
-      {"tag_name":"v1.0.10","html_url":"https://example.com/v1.0.10","draft":false,"prerelease":false},
-      {"tag_name":"v1.0.4","html_url":"https://example.com/v1.0.4","draft":false,"prerelease":false}
+      {"tag_name":"v1.0.2","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.2","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.10","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.10","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.4","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.4","draft":false,"prerelease":false}
     ]
     """
     let data = try #require(releasesJSON.data(using: .utf8))
