@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var errorMessage = ""
     @State private var isSearchVisible = false
     @State private var searchQuery = ""
+    @State private var queryExpression = ""
     @State private var currentMatchIndex = 0
     @State private var outputMatchRanges: [NSRange] = []
     @State private var isOutputSearchSkippedForSize = false
@@ -135,7 +136,7 @@ struct ContentView: View {
                 Button("清空") {
                     clearAll()
                 }
-                .disabled(inputText.isEmpty && outputText.isEmpty && errorMessage.isEmpty && searchQuery.isEmpty && !isTransforming)
+                .disabled(inputText.isEmpty && outputText.isEmpty && errorMessage.isEmpty && searchQuery.isEmpty && queryExpression.isEmpty && !isTransforming)
             }
 
             if isSearchVisible {
@@ -155,7 +156,9 @@ struct ContentView: View {
             }
 
             HStack(alignment: .top, spacing: 12) {
-                editor(title: "输入", text: $inputText)
+                editor(title: "输入", text: $inputText) {
+                    queryExpressionBar()
+                }
                 outputEditor(title: "输出")
             }
             .frame(maxHeight: .infinity)
@@ -216,7 +219,7 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func editor(title: String, text: Binding<String>) -> some View {
+    private func editor<Footer: View>(title: String, text: Binding<String>, @ViewBuilder footer: () -> Footer) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.headline)
@@ -226,8 +229,33 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
+            footer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func queryExpressionBar() -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                TextField("JS 查询/处理表达式，例如 .hi.map(x => x) 或 .filter(x => x > 1)", text: $queryExpression)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit {
+                        runQueryExpression()
+                    }
+                    .disabled(isTransforming)
+
+                Button("执行") {
+                    runQueryExpression()
+                }
+                .disabled(inputText.isEmpty || queryExpression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTransforming)
+            }
+
+            Text("表达式基于输入 JSON 执行：以 . 或 [ 开头会自动接在根数据后，也可用 value、input 或 $ 引用根数据。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
     }
 
     private func outputEditor(title: String) -> some View {
@@ -287,6 +315,24 @@ struct ContentView: View {
         transformInput(actionName: "格式化", JSONFormatterService.format)
     }
 
+    private func runQueryExpression() {
+        let expression = queryExpression.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "JS 查询失败：请输入 JSON 后再执行表达式"
+            logger.info("跳过 JS 查询，输入为空")
+            return
+        }
+        guard !expression.isEmpty else {
+            errorMessage = "JS 查询失败：JS 表达式不能为空"
+            logger.info("跳过 JS 查询，表达式为空")
+            return
+        }
+
+        transformInput(actionName: "JS 查询") { input in
+            try JSONFormatterService.evaluateQuery(input, expression: expression)
+        }
+    }
+
     private func compactJSON() {
         transformInput(actionName: "压缩", JSONFormatterService.compact)
     }
@@ -342,7 +388,7 @@ struct ContentView: View {
                     }
                     logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(output.text.count, privacy: .public)，大文件虚拟化 \(output.lineIndex.isVirtualized, privacy: .public)")
                 case .failure(let error):
-                    errorMessage = "JSON 解析失败：\(error.localizedDescription)"
+                    errorMessage = "\(actionName)失败：\(error.localizedDescription)"
                     logger.error("JSON \(actionName, privacy: .public) 失败，输入长度 \(input.count, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -371,6 +417,7 @@ struct ContentView: View {
         outputText = ""
         errorMessage = ""
         searchQuery = ""
+        queryExpression = ""
         currentMatchIndex = 0
         outputMatchRanges = []
         isOutputSearchSkippedForSize = false

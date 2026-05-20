@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "JSONFormatterApp",
-            path: "Sources/JSONFormatterApp"
+            path: "Sources/JSONFormatterApp",
+            linkerSettings: [
+                .linkedFramework("JavaScriptCore")
+            ]
         ),
         .testTarget(
             name: "JSONFormatterAppTests",

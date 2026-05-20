@@ -62,6 +62,75 @@ import Testing
     #expect(output == "{\"a\":1,\"b\":2}")
 }
 
+@Test func queryExpressionMapsNestedArray() throws {
+    let output = try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: ".hi.map(x => x * 2)")
+
+    #expect(output == "[\n  2,\n  4,\n  6\n]")
+}
+
+@Test func queryExpressionFiltersAndMapsArray() throws {
+    let output = try JSONFormatterService.evaluateQuery(
+        "[{\"name\":\"a\",\"score\":1},{\"name\":\"b\",\"score\":3},{\"name\":\"c\",\"score\":5}]",
+        expression: ".filter(x => x.score >= 3).map(x => x.name)"
+    )
+
+    #expect(output == "[\n  \"b\",\n  \"c\"\n]")
+}
+
+@Test func queryExpressionFiltersSingleNestedArrayByChain() throws {
+    let output = try JSONFormatterService.evaluateQuery(
+        "{\"items\":[{\"name\":\"a\",\"score\":1},{\"name\":\"b\",\"score\":3}]}",
+        expression: ".filter(x => x.score >= 3)"
+    )
+
+    #expect(output.contains("    \"name\" : \"b\""))
+    #expect(!output.contains("\"name\" : \"a\""))
+}
+
+@Test func queryExpressionCanUseValueAlias() throws {
+    let output = try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "value.hi.filter(x => x > 1)")
+
+    #expect(output == "[\n  2,\n  3\n]")
+}
+
+@Test func queryExpressionCanUseInputAndDollarAliases() throws {
+    let inputAliasOutput = try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "input.hi.map(x => x + 1)")
+    let dollarAliasOutput = try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "$.hi.filter(x => x < 3)")
+
+    #expect(inputAliasOutput == "[\n  2,\n  3,\n  4\n]")
+    #expect(dollarAliasOutput == "[\n  1,\n  2\n]")
+}
+
+@Test func queryExpressionRejectsInvalidExpression() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: ".hi.map(")
+    }
+}
+
+@Test func queryExpressionRejectsUnsafeExpression() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "Function('return 1')()")
+    }
+}
+
+@Test func queryExpressionRejectsGlobalAccess() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "globalThis")
+    }
+}
+
+@Test func queryExpressionRejectsSemicolonStatements() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "value.hi; value")
+    }
+}
+
+@Test func queryExpressionRejectsUnsupportedResult() {
+    #expect(throws: (any Error).self) {
+        try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: "value.hi.map")
+    }
+}
+
 @Test func escapeObjectJSON() throws {
     let output = try JSONFormatterService.escape("{\n  \"b\" : 2,\n  \"a\" : \"hello\"\n}")
 
