@@ -20,6 +20,12 @@ macOS 下的一款本地 JSON 格式化 App。
 <img width="900" height="672" alt="Clipboard_Screenshot_1779088750" src="https://github.com/user-attachments/assets/068d9951-34c9-4af0-91b4-ea5fcb5a9642" />
 
 
+## 更新记录
+
+### JSON Formatter 1.0.5
+
+- bug fix：修复自动检测更新逻辑，避免版本比较异常导致新版本提示不准确。
+
 ## 构建
 
 ```bash

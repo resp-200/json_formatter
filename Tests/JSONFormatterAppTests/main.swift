@@ -160,6 +160,38 @@ import Testing
     #expect(!ReleaseVersionChecker.isNewerRelease(currentVersion: "开发版", latestTagName: "v1.0.2"))
 }
 
+@Test func releaseVersionCheckerSelectsHighestStableReleaseFromList() throws {
+    let releasesJSON = """
+    [
+      {"tag_name":"v1.0.3","html_url":"https://example.com/v1.0.3","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.5-beta","html_url":"https://example.com/v1.0.5-beta","draft":false,"prerelease":true},
+      {"tag_name":"v1.0.4","html_url":"https://example.com/v1.0.4","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.6","html_url":"https://example.com/v1.0.6","draft":true,"prerelease":false}
+    ]
+    """
+    let data = try #require(releasesJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(from: data)
+
+    #expect(releaseInfo.tagName == "v1.0.4")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://example.com/v1.0.4")
+}
+
+@Test func releaseVersionCheckerHandlesUnorderedReleaseList() throws {
+    let releasesJSON = """
+    [
+      {"tag_name":"v1.0.2","html_url":"https://example.com/v1.0.2","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.10","html_url":"https://example.com/v1.0.10","draft":false,"prerelease":false},
+      {"tag_name":"v1.0.4","html_url":"https://example.com/v1.0.4","draft":false,"prerelease":false}
+    ]
+    """
+    let data = try #require(releasesJSON.data(using: .utf8))
+
+    let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(from: data)
+
+    #expect(releaseInfo.tagName == "v1.0.10")
+}
+
 @Test func formatUserFeedbackJSONAfterClearingInput() throws {
     let output = try JSONFormatterService.format("{\"name\":\"test\",\"items”:[1,2,3,4,5]}")
 
