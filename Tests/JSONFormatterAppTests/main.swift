@@ -163,14 +163,14 @@ import Testing
 
 @Test func releaseVersionCheckerParsesLatestManifest() throws {
     let manifestJSON = """
-    {"version":"1.0.5","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5"}
+    {"version":"1.0.6","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6"}
     """
     let data = try #require(manifestJSON.data(using: .utf8))
 
     let releaseInfo = try ReleaseVersionChecker.latestManifestReleaseInfo(from: data)
 
-    #expect(releaseInfo.tagName == "1.0.5")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.5")
+    #expect(releaseInfo.tagName == "1.0.6")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
 }
 
 @Test func releaseVersionCheckerManifestFallsBackToReleasesPageWithoutURL() throws {
@@ -187,7 +187,7 @@ import Testing
 
 @Test func releaseVersionCheckerUsesManifestBeforeFallbackData() throws {
     let manifestJSON = """
-    {"version":"1.0.5","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5"}
+    {"version":"1.0.6","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6"}
     """
     let releasesJSON = """
     [
@@ -199,8 +199,8 @@ import Testing
 
     let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(manifestData: manifestData, fallbackReleasesData: releasesData)
 
-    #expect(releaseInfo.tagName == "1.0.5")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.5")
+    #expect(releaseInfo.tagName == "1.0.6")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
 }
 
 @Test func releaseVersionCheckerFallsBackWhenManifestInvalid() throws {
