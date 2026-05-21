@@ -15,6 +15,10 @@ struct ContentView: View {
     @State private var currentMatchIndex = 0
     @State private var outputMatchRanges: [NSRange] = []
     @State private var isOutputSearchSkippedForSize = false
+    @State private var outputDisplayMode: OutputDisplayMode = .text
+    @State private var jsonTreeRoot: JSONTreeNode?
+    @State private var expandedTreeNodeIDs: Set<String> = []
+    @State private var treeSearchMatches: [JSONTreeSearchMatch] = []
     @State private var outputRenderRevision = 0
     @State private var outputScrollRevision = 0
     @State private var outputLineIndex = OutputLineIndex.empty
@@ -41,6 +45,23 @@ struct ContentView: View {
         }
 
         return outputMatchRanges[safeCurrentMatchIndex]
+    }
+
+    private var activeMatchCount: Int {
+        switch outputDisplayMode {
+        case .text:
+            return outputMatchRanges.count
+        case .tree:
+            return treeSearchMatches.count
+        }
+    }
+
+    private var safeActiveMatchIndex: Int {
+        guard activeMatchCount > 0 else {
+            return 0
+        }
+
+        return min(max(currentMatchIndex, 0), activeMatchCount - 1)
     }
 
     private var currentAppVersion: String {
@@ -140,7 +161,7 @@ struct ContentView: View {
             }
 
             if isSearchVisible {
-                outputSearchBar(matchCount: outputMatchRanges.count)
+                outputSearchBar(matchCount: activeMatchCount)
             }
 
             if isTransforming {
@@ -181,6 +202,9 @@ struct ContentView: View {
             refreshSearchMatches()
         }
         .onChange(of: outputText) { _, _ in
+            refreshSearchMatches()
+        }
+        .onChange(of: outputDisplayMode) { _, _ in
             refreshSearchMatches()
         }
         .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
@@ -260,18 +284,58 @@ struct ContentView: View {
 
     private func outputEditor(title: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.headline)
-            HighlightedOutputView(
-                outputText: outputText,
-                lineIndex: outputLineIndex,
-                isDarkMode: isDarkMode,
-                matchRanges: outputMatchRanges,
-                currentMatchIndex: safeCurrentMatchIndex,
-                currentMatchRange: currentMatchRange,
-                renderRevision: outputRenderRevision,
-                scrollRevision: outputScrollRevision
-            )
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.headline)
+
+                Spacer()
+
+                Picker("输出视图", selection: $outputDisplayMode) {
+                    ForEach(OutputDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 130)
+                .disabled(outputText.isEmpty || isTransforming)
+
+                if outputDisplayMode == .tree {
+                    Button("一键展开") {
+                        expandEntireTree()
+                    }
+                    .disabled(jsonTreeRoot == nil)
+
+                    Button("一键收起") {
+                        collapseEntireTree()
+                    }
+                    .disabled(jsonTreeRoot == nil)
+                }
+            }
+
+            Group {
+                switch outputDisplayMode {
+                case .text:
+                    HighlightedOutputView(
+                        outputText: outputText,
+                        lineIndex: outputLineIndex,
+                        isDarkMode: isDarkMode,
+                        matchRanges: outputMatchRanges,
+                        currentMatchIndex: safeCurrentMatchIndex,
+                        currentMatchRange: currentMatchRange,
+                        renderRevision: outputRenderRevision,
+                        scrollRevision: outputScrollRevision
+                    )
+                case .tree:
+                    JSONTreeView(
+                        root: jsonTreeRoot,
+                        expandedNodeIDs: $expandedTreeNodeIDs,
+                        searchMatches: treeSearchMatches,
+                        currentMatchIndex: safeActiveMatchIndex
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(nsColor: .textBackgroundColor))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
@@ -362,7 +426,8 @@ struct ContentView: View {
                 let output = try transform(input)
                 return OutputTransformResult(
                     text: output,
-                    lineIndex: OutputLineIndex(text: output)
+                    lineIndex: OutputLineIndex(text: output),
+                    treeRoot: try? JSONTreeBuilder.build(from: output)
                 )
             }
 
@@ -379,9 +444,12 @@ struct ContentView: View {
                 case .success(let output):
                     currentMatchIndex = 0
                     outputMatchRanges = []
+                    treeSearchMatches = []
                     outputLineIndex = output.lineIndex
-                    isOutputSearchSkippedForSize = output.lineIndex.isVirtualized
+                    isOutputSearchSkippedForSize = output.lineIndex.isVirtualized && outputDisplayMode == .text
                     outputText = output.text
+                    jsonTreeRoot = output.treeRoot
+                    expandedTreeNodeIDs = output.treeRoot.map { [$0.id] } ?? []
                     outputRenderRevision += 1
                     if copyAfterSuccess {
                         copyToPasteboard(output.text, actionName: actionName)
@@ -420,8 +488,11 @@ struct ContentView: View {
         queryExpression = ""
         currentMatchIndex = 0
         outputMatchRanges = []
+        treeSearchMatches = []
         isOutputSearchSkippedForSize = false
         outputLineIndex = .empty
+        jsonTreeRoot = nil
+        expandedTreeNodeIDs = []
         activeTransformID = nil
         isTransforming = false
         outputRenderRevision += 1
@@ -431,8 +502,10 @@ struct ContentView: View {
 
     private func openSearch() {
         isSearchVisible = true
-        if outputLineIndex.isVirtualized {
+        if outputDisplayMode == .text, outputLineIndex.isVirtualized {
             isOutputSearchSkippedForSize = true
+        } else if outputDisplayMode == .tree {
+            isOutputSearchSkippedForSize = false
         }
         DispatchQueue.main.async {
             isSearchFocused = true
@@ -444,6 +517,7 @@ struct ContentView: View {
         searchQuery = ""
         currentMatchIndex = 0
         outputMatchRanges = []
+        treeSearchMatches = []
         isOutputSearchSkippedForSize = false
     }
 
@@ -452,7 +526,7 @@ struct ContentView: View {
             return
         }
 
-        currentMatchIndex = (safeCurrentMatchIndex + matchCount - 1) % matchCount
+        currentMatchIndex = (safeActiveMatchIndex + matchCount - 1) % matchCount
         outputScrollRevision += 1
     }
 
@@ -461,7 +535,7 @@ struct ContentView: View {
             return
         }
 
-        currentMatchIndex = (safeCurrentMatchIndex + 1) % matchCount
+        currentMatchIndex = (safeActiveMatchIndex + 1) % matchCount
         outputScrollRevision += 1
     }
 
@@ -471,14 +545,32 @@ struct ContentView: View {
         }
 
         if isOutputSearchSkippedForSize {
-            return "输出过大，搜索已暂停"
+            return "输出过大，文本搜索已暂停"
         }
 
         guard matchCount > 0 else {
             return "0 个匹配"
         }
 
-        return "\(safeCurrentMatchIndex + 1) / \(matchCount)"
+        return "\(safeActiveMatchIndex + 1) / \(matchCount)"
+    }
+
+    private func expandEntireTree() {
+        guard let jsonTreeRoot else {
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            expandedTreeNodeIDs = jsonTreeRoot.allExpandableNodeIDs()
+        }
+        logger.info("展开整棵 JSON 树，节点数 \(expandedTreeNodeIDs.count, privacy: .public)")
+    }
+
+    private func collapseEntireTree() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            expandedTreeNodeIDs = []
+        }
+        logger.info("收起整棵 JSON 树，匹配数 \(treeSearchMatches.count, privacy: .public)")
     }
 
     private func refreshSearchMatches() {
@@ -487,19 +579,34 @@ struct ContentView: View {
 
         guard !searchQuery.isEmpty else {
             outputMatchRanges = []
+            treeSearchMatches = []
             isOutputSearchSkippedForSize = false
             return
         }
 
-        guard !outputLineIndex.isVirtualized, outputText.utf8.count <= OutputRenderingPolicy.maxSearchableBytes else {
-            outputMatchRanges = []
-            isOutputSearchSkippedForSize = true
-            logger.info("跳过大 JSON 输出搜索，输出字节数 \(outputText.utf8.count, privacy: .public)，大文件虚拟化 \(outputLineIndex.isVirtualized, privacy: .public)")
-            return
-        }
+        switch outputDisplayMode {
+        case .text:
+            treeSearchMatches = []
+            guard !outputLineIndex.isVirtualized, outputText.utf8.count <= OutputRenderingPolicy.maxSearchableBytes else {
+                outputMatchRanges = []
+                isOutputSearchSkippedForSize = true
+                logger.info("跳过大 JSON 输出文本搜索，输出字节数 \(outputText.utf8.count, privacy: .public)，大文件虚拟化 \(outputLineIndex.isVirtualized, privacy: .public)")
+                return
+            }
 
-        isOutputSearchSkippedForSize = false
-        outputMatchRanges = searchRanges(in: outputText, query: searchQuery)
+            isOutputSearchSkippedForSize = false
+            outputMatchRanges = searchRanges(in: outputText, query: searchQuery)
+        case .tree:
+            outputMatchRanges = []
+            isOutputSearchSkippedForSize = false
+            guard let jsonTreeRoot else {
+                treeSearchMatches = []
+                return
+            }
+
+            treeSearchMatches = jsonTreeRoot.searchMatches(query: searchQuery, limit: OutputRenderingPolicy.maxSearchMatches)
+            expandedTreeNodeIDs.formUnion(treeSearchMatches.flatMap(\.ancestorIDs))
+        }
     }
 
     private func toggleColorScheme() {
@@ -551,9 +658,15 @@ struct ContentView: View {
             let key = event.charactersIgnoringModifiers?.lowercased()
             let modifierFlags = event.modifierFlags.intersection([.command, .control, .option, .shift])
             let isFindShortcut = key == "f" && (modifierFlags == .command || modifierFlags == .control)
+            let isEscape = event.keyCode == 53
 
             if isFindShortcut {
                 openSearch()
+                return nil
+            }
+
+            if isEscape, isSearchVisible {
+                closeSearch()
                 return nil
             }
 
@@ -1163,9 +1276,28 @@ private func searchRanges(in text: String, query: String) -> [NSRange] {
     return ranges
 }
 
+private enum OutputDisplayMode: String, CaseIterable, Identifiable {
+    case text
+    case tree
+
+    var id: String {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .text:
+            return "文本"
+        case .tree:
+            return "树状"
+        }
+    }
+}
+
 private struct OutputTransformResult: Sendable {
     let text: String
     let lineIndex: OutputLineIndex
+    let treeRoot: JSONTreeNode?
 }
 
 private struct OutputLineIndex: Equatable, Sendable {

@@ -62,6 +62,36 @@ import Testing
     #expect(output == "{\"a\":1,\"b\":2}")
 }
 
+@Test func jsonTreeBuilderBuildsStableTreePaths() throws {
+    let root = try JSONTreeBuilder.build(from: "{\"items\":[{\"name\":\"first\"}],\"meta\":{\"count\":1}}")
+
+    #expect(root.id == "$")
+    #expect(root.children.map(\.label) == ["items", "meta"])
+    #expect(root.children[0].children[0].id == "$.items[0]")
+    #expect(root.children[1].children[0].label == "count")
+}
+
+@Test func jsonTreeSearchMatchesLabelAndSummaryAndReturnsAncestors() throws {
+    let root = try JSONTreeBuilder.build(from: "{\"items\":[{\"name\":\"first\",\"enabled\":true}],\"meta\":{\"count\":1}}")
+    let labelMatches = root.searchMatches(query: "name")
+    let summaryMatches = root.searchMatches(query: "FIRST")
+
+    #expect(labelMatches.map(\.nodeID).contains("$.items[0].name"))
+    #expect(labelMatches.first(where: { $0.nodeID == "$.items[0].name" })?.ancestorIDs == ["$", "$.items", "$.items[0]"])
+    #expect(summaryMatches.map(\.nodeID).contains("$.items[0].name"))
+}
+
+@Test func jsonTreeExpandableIDsIncludeContainersOnly() throws {
+    let root = try JSONTreeBuilder.build(from: "{\"items\":[{\"name\":\"first\"}],\"empty\":[]}")
+    let expandableIDs = root.allExpandableNodeIDs()
+
+    #expect(expandableIDs.contains("$"))
+    #expect(expandableIDs.contains("$.items"))
+    #expect(expandableIDs.contains("$.items[0]"))
+    #expect(!expandableIDs.contains("$.items[0].name"))
+    #expect(!expandableIDs.contains("$.empty"))
+}
+
 @Test func queryExpressionMapsNestedArray() throws {
     let output = try JSONFormatterService.evaluateQuery("{\"hi\":[1,2,3]}", expression: ".hi.map(x => x * 2)")
 
@@ -163,14 +193,14 @@ import Testing
 
 @Test func releaseVersionCheckerParsesLatestManifest() throws {
     let manifestJSON = """
-    {"version":"1.0.6","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6"}
+    {"version":"1.0.7","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.7"}
     """
     let data = try #require(manifestJSON.data(using: .utf8))
 
     let releaseInfo = try ReleaseVersionChecker.latestManifestReleaseInfo(from: data)
 
-    #expect(releaseInfo.tagName == "1.0.6")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
+    #expect(releaseInfo.tagName == "1.0.7")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.7")
 }
 
 @Test func releaseVersionCheckerManifestFallsBackToReleasesPageWithoutURL() throws {
@@ -187,7 +217,7 @@ import Testing
 
 @Test func releaseVersionCheckerUsesManifestBeforeFallbackData() throws {
     let manifestJSON = """
-    {"version":"1.0.6","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6"}
+    {"version":"1.0.7","url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.7"}
     """
     let releasesJSON = """
     [
@@ -199,8 +229,8 @@ import Testing
 
     let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(manifestData: manifestData, fallbackReleasesData: releasesData)
 
-    #expect(releaseInfo.tagName == "1.0.6")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
+    #expect(releaseInfo.tagName == "1.0.7")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.7")
 }
 
 @Test func releaseVersionCheckerFallsBackWhenManifestInvalid() throws {
@@ -209,7 +239,7 @@ import Testing
     """
     let releasesJSON = """
     [
-      {"tag_name":"v1.0.6","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6","draft":false,"prerelease":false}
+      {"tag_name":"v1.0.7","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.7","draft":false,"prerelease":false}
     ]
     """
     let manifestData = try #require(manifestJSON.data(using: .utf8))
@@ -217,8 +247,8 @@ import Testing
 
     let releaseInfo = try ReleaseVersionChecker.latestReleaseInfo(manifestData: manifestData, fallbackReleasesData: releasesData)
 
-    #expect(releaseInfo.tagName == "v1.0.6")
-    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.6")
+    #expect(releaseInfo.tagName == "v1.0.7")
+    #expect(releaseInfo.htmlURL.absoluteString == "https://github.com/resp-200/json_formatter/releases/tag/v1.0.7")
 }
 
 @Test func releaseVersionCheckerSelectsHighestStableReleaseFromList() throws {
@@ -227,7 +257,7 @@ import Testing
       {"tag_name":"v1.0.3","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.3","draft":false,"prerelease":false},
       {"tag_name":"v1.0.5-beta","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.5-beta","draft":false,"prerelease":true},
       {"tag_name":"v1.0.4","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.4","draft":false,"prerelease":false},
-      {"tag_name":"v1.0.6","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.6","draft":true,"prerelease":false}
+      {"tag_name":"v1.0.7","html_url":"https://github.com/resp-200/json_formatter/releases/tag/v1.0.7","draft":true,"prerelease":false}
     ]
     """
     let data = try #require(releasesJSON.data(using: .utf8))
