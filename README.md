@@ -1,106 +1,140 @@
 # JSON Formatter
 
-macOS 下的一款本地 JSON 格式化 App。
+English | [简体中文](README_CN.md)
 
-## 功能
+A local macOS SwiftUI app for formatting JSON. It supports formatting, compacting, escaping, tree browsing, search, JavaScript query expressions, and multiple external input flows.
 
-- 输入 JSON 后按 `Cmd+Enter` 格式化
-- 普通 `Enter` 保留为换行
-- 支持格式化、压缩、转义、转义并复制 JSON、复制结果、清空
-- JSON 解析失败时展示错误提示
-- 支持通过 URL Scheme、启动参数、JSON 文件、系统 Services/剪贴板入口传入 JSON 并自动格式化
-- 启动后检测 GitHub Releases，新版本会在当前版本号后显示红色 `new` 标签，点击可前往下载
+## Features
 
-## 效果图
+- Format JSON with `Cmd+Enter`; plain `Enter` stays as a newline in the editor.
+- Format, compact, escape, escape-and-copy JSON, copy result, and clear content.
+- Format escaped JSON strings into decoded object or array pretty JSON when applicable; non-JSON strings keep the normal JSON string behavior.
+- Smart quote normalization fallback for formatting, useful when JSON is copied from rich text sources.
+- Output display modes: text view and tree view.
+- Tree view supports expand all, collapse all, and search match highlighting.
+- Search output with `Cmd+F` or `Ctrl+F`, including previous/next match navigation.
+- Run local JavaScript query/processing expressions against the input JSON. Expressions can start with `.` or `[`, or use `value`, `input`, and `$` as root references. Evaluation uses a restricted JavaScriptCore environment.
+- Virtualized/lazy rendering for large output. Search and highlighting may be paused for very large text output to keep the UI responsive, while copy still copies the full JSON.
+- Dark and light mode toggle.
+- Error display for parse or transform failures.
+- External input support through URL schemes, launch arguments, `.json` / `.jsonc` / `.geojson` file open, macOS Services, and clipboard-assisted launch/reopen flows.
+- GitHub Releases version check with a red `new` badge next to the current version when an update is available.
 
-使用聚焦搜索快速打开json文件
+## Screenshots
+
+Open JSON files quickly from Spotlight:
+
 <img width="640" height="467" alt="Clipboard_Screenshot_1779088658" src="https://github.com/user-attachments/assets/08c5e82c-4b44-4e5d-a155-fc8ab19a52e0" />
 
-不同层级使用不同颜色展示，支持关键字搜索
+Colorized JSON levels with keyword search:
+
 <img width="900" height="672" alt="Clipboard_Screenshot_1779088750" src="https://github.com/user-attachments/assets/068d9951-34c9-4af0-91b4-ea5fcb5a9642" />
 
+## Shortcuts and Common Actions
 
-## 更新记录
+- `Cmd+Enter`: format the input JSON.
+- `Enter`: insert a newline in the input editor.
+- `Cmd+F` / `Ctrl+F`: search the output.
+- Search works with both text output and tree output.
+
+## JavaScript Query Examples
+
+Expressions run locally. JSON data is not uploaded.
+
+```text
+.items.filter(x => x.enabled)
+[0].name
+value.items.map(x => x.id)
+input.users.filter(u => u.age >= 18)
+$.items.length
+```
+
+## Changelog
+
+### JSON Formatter 1.0.7
+
+- Continued improvements to release manifest compatibility and update detection.
+
+### JSON Formatter 1.0.6
+
+- Improved update detection fallback behavior.
 
 ### JSON Formatter 1.0.5
 
-- bug fix：修复自动检测更新逻辑，避免版本比较异常导致新版本提示不准确。
+- Fixed automatic update detection so version comparison issues do not show inaccurate update badges.
 
-## 构建
+## Build
 
 ```bash
 scripts/build_app.sh
 ```
 
-构建产物：
+Build artifacts:
 
 ```text
 dist/JSON Formatter.app
 dist/JSON Formatter.dmg
 ```
 
-脚本会生成 App Bundle，并在签名前规范 `CFBundleIdentifier`、补齐基础 `Info.plist` 字段、清理 bundle 扩展属性，然后根据环境变量选择签名方式：
+The script creates the app bundle, normalizes `CFBundleIdentifier`, fills required `Info.plist` fields, clears bundle extended attributes, and chooses a signing strategy based on environment variables.
 
-App 显示名保持为 `JSON Formatter`，内部可执行文件名使用无空格的 `JSONFormatter`，避免部分 macOS 启动或分发链路对带空格可执行名处理异常。
+The app display name remains `JSON Formatter`, while the internal executable name is `JSONFormatter` without spaces. This avoids issues in some macOS launch or distribution paths that do not handle executable names with spaces well.
 
-- 如果设置了 `SIGN_IDENTITY`，脚本会使用该真实代码签名身份签名：
+- If `SIGN_IDENTITY` is set, the script signs with that real code signing identity:
 
   ```bash
-  SIGN_IDENTITY="证书名" scripts/build_app.sh
+  SIGN_IDENTITY="Certificate Name" scripts/build_app.sh
   ```
 
-  这是最可靠达成“别人拿到包后，不执行命令，只在系统设置的隐私与安全性中放行”的方式。证书名可用 Keychain 中已有的代码签名证书名称，例如 Apple Development 或 Developer ID Application 证书名称。
-- 如果未设置 `SIGN_IDENTITY`，脚本会退回 ad-hoc 签名。脚本会在签名和校验之后生成包含 App Bundle 和 Applications 快捷入口的 DMG 分发包，这些处理是为了尽量避免无证书分发时被 macOS 直接判定为 damaged，并尽量进入“系统设置 → 隐私与安全性 → 仍要打开”的路径，但 ad-hoc 签名不保证所有 Mac 都可放行。
+  This is the most reliable way to let other users open the app without running terminal commands, only approving it in System Settings > Privacy & Security when needed. The certificate name can be an existing Keychain code signing certificate, such as an Apple Development or Developer ID Application certificate.
+- If `SIGN_IDENTITY` is not set, the script falls back to ad-hoc signing. After signing and verification, it creates a DMG containing the app bundle and an Applications shortcut. This is intended to reduce the chance that macOS marks an unsigned distribution as damaged and to make the app more likely to enter the System Settings > Privacy & Security > Open Anyway path, but ad-hoc signing does not guarantee that every Mac can approve it.
 
-如果需要完全无弹窗或最稳定的对外分发，需要使用 Developer ID 签名并进行 notarization（公证）。当前脚本不自动创建证书、不修改系统 Keychain，也不执行公证流程。
+For fully smooth or stable public distribution, use Developer ID signing and notarization. The current script does not create certificates, modify the system Keychain, or run notarization.
 
-当前脚本默认使用本机 SwiftPM 环境构建当前架构的可执行文件；跨 Intel / Apple Silicon 分发需要分别提供对应架构产物，或在具备相应 Xcode 构建能力的环境中制作 universal 构建。当前脚本不承诺生成 universal App。
+The script builds a native executable for the current machine architecture using the local SwiftPM environment. For Intel / Apple Silicon cross-distribution, provide separate architecture builds or create a universal build in an environment with the required Xcode build support. The current script does not guarantee a universal app.
 
-本机安装到应用程序目录：
+Install locally to Applications:
 
 ```bash
 cp -R "dist/JSON Formatter.app" "/Applications/"
 ```
 
-分发给他人时，发送 `dist/JSON Formatter.dmg`。对方双击 DMG 挂载后，把 `JSON Formatter.app` 拖到 `Applications`，再从“应用程序”目录双击打开；如果 macOS 拦截，真实签名身份构建的包通常可前往“系统设置 → 隐私与安全性”点击“仍要打开”。ad-hoc 签名包仅是尽量降低 damaged 风险，不保证满足这一目标。
+To distribute the app, send `dist/JSON Formatter.dmg`. Recipients can mount the DMG, drag `JSON Formatter.app` to Applications, and open it from the Applications folder. If macOS blocks it, builds signed with a real signing identity can usually be approved in System Settings > Privacy & Security > Open Anyway. Ad-hoc signed builds only reduce the damaged-app risk and cannot guarantee approval.
 
-## 外部调用
+## External Invocation
 
-macOS Spotlight 不会把 `Command+Space` 后继续输入的任意文本作为启动参数传给普通第三方 App，所以不能原生支持 “Spotlight 中输入 `JSON Formatter {}` 后回车” 这种形式。该输入会被 Spotlight 当成搜索关键字，截图中的“无结果”是系统行为。
+macOS Spotlight does not pass arbitrary text typed after `Command+Space` as launch arguments to normal third-party apps. For example, typing `JSON Formatter {}` in Spotlight and pressing Enter is treated as a Spotlight search, not as app input. A “no results” state in that flow is normal macOS behavior.
 
-可使用以下入口达到等价效果：
+Use one of the supported input flows below instead.
 
-### URL Scheme 自动格式化
+### URL Scheme Auto-Format
+
+Supported schemes are `jsonformatter://` and `json-formatter://`. Supported query fields are `text`, `json`, `input`, and `q`:
 
 ```bash
 open 'jsonformatter://format?text=%7B%22a%22%3A1%7D'
-```
-
-也支持更易读的 scheme 别名和参数名：
-
-```bash
 open 'json-formatter://format?json=%7B%22a%22%3A1%7D'
 ```
 
-### 启动参数自动格式化
+### Launch Argument Auto-Format
 
 ```bash
 open -a "JSON Formatter" --args '{"a":1}'
 ```
 
-### 打开 JSON 文件自动格式化
+### Open JSON Files
 
-安装后，可右键 `.json` / `.jsonc` / `.geojson` 文件，选择“打开方式”中的 JSON Formatter。
+After installation, right-click a `.json`, `.jsonc`, or `.geojson` file and choose JSON Formatter from “Open With”.
 
-### 从 Spotlight 配合剪贴板使用
+### Spotlight with Clipboard
 
-1. 复制 JSON 文本。
-2. 按 `Command+Space` 搜索并打开 `JSON Formatter`。
-3. App 检测到剪贴板文本后会显示“格式化剪贴板”提示，点击即可导入并格式化。
+1. Copy JSON text.
+2. Press `Command+Space` and open `JSON Formatter`.
+3. When the copied text is valid JSON, the app can import and format it on launch or reopen.
 
-### 系统 Services
+### macOS Services
 
-安装后，选中文本并在 macOS 服务菜单中选择 `Format JSON`，即可把选中文本发送到 App 格式化。首次安装后如果服务未立即出现，可重新登录或运行：
+After installation, select text and choose `Format JSON` from the macOS Services menu to send it to the app for formatting. If the service does not appear immediately after installation, log in again or run:
 
 ```bash
 /System/Library/CoreServices/pbs -flush
