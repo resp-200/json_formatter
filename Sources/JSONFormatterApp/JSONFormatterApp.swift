@@ -25,6 +25,16 @@ struct JSONFormatterApp: App {
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
 
+                Button("保存当前 JSON 页面") {
+                    NotificationCenter.default.post(name: .saveJSONPageRequested, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+
+                Button("新建 JSON 页面") {
+                    NotificationCenter.default.post(name: .newJSONPageRequested, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command])
+
                 Button("搜索输出 JSON") {
                     NotificationCenter.default.post(name: .findOutputRequested, object: nil)
                 }
@@ -105,7 +115,7 @@ final class JSONFormatterAppDelegate: NSObject, NSApplicationDelegate {
 
     private func stageClipboardTextIfAvailable(source: String) {
         guard externalInputStore.pendingFormatRequest == nil else {
-            logger.info("跳过剪贴板自动格式化，已有外部 JSON 输入待处理，source=\(source, privacy: .public)")
+            logger.info("跳过剪贴板自动格式化，已有外部 JSON 输入待处理，来源 \(source, privacy: .public)")
             return
         }
 
@@ -114,15 +124,15 @@ final class JSONFormatterAppDelegate: NSObject, NSApplicationDelegate {
 
         switch clipboardAutoFormatter.decision(changeCount: changeCount, text: text) {
         case .shouldFormat(let text):
-            logger.info("自动格式化剪贴板 JSON，source=\(source, privacy: .public)，changeCount=\(changeCount, privacy: .public)，length=\(text.count, privacy: .public)")
+            logger.info("自动格式化剪贴板 JSON，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)，文本长度 \(text.count, privacy: .public)")
             externalInputStore.requestFormat(text, source: source)
         case .duplicateChangeCount:
-            logger.info("跳过重复剪贴板内容，source=\(source, privacy: .public)，changeCount=\(changeCount, privacy: .public)")
+            logger.info("跳过重复剪贴板内容，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)")
         case .noText:
-            logger.info("跳过空剪贴板文本，source=\(source, privacy: .public)，changeCount=\(changeCount, privacy: .public)")
+            logger.info("跳过空剪贴板文本，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)")
             externalInputStore.clearClipboardOffer()
         case .invalidJSON:
-            logger.info("跳过非法剪贴板 JSON，source=\(source, privacy: .public)，changeCount=\(changeCount, privacy: .public)")
+            logger.info("跳过非法剪贴板 JSON，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)")
             externalInputStore.clearClipboardOffer()
         }
     }
@@ -146,7 +156,7 @@ final class ExternalJSONInputStore: ObservableObject {
     private init() {}
 
     func requestFormat(_ text: String, source: String) {
-        logger.info("收到外部 JSON 输入，source=\(source, privacy: .public)，length=\(text.count, privacy: .public)")
+        logger.info("收到外部 JSON 输入，来源 \(source, privacy: .public)，文本长度 \(text.count, privacy: .public)")
         NSApp.activate(ignoringOtherApps: true)
 
         let request = ExternalJSONInputRequest(text: text)
@@ -159,7 +169,7 @@ final class ExternalJSONInputStore: ObservableObject {
 
     func markFormatRequestHandled(_ request: ExternalJSONInputRequest) {
         guard pendingFormatRequest?.id == request.id else {
-            logger.info("跳过已过期的外部 JSON 输入请求，requestId=\(request.id.uuidString, privacy: .public)")
+            logger.info("跳过已过期的外部 JSON 输入请求，请求标识 \(request.id.uuidString, privacy: .public)")
             return
         }
 
@@ -167,7 +177,7 @@ final class ExternalJSONInputStore: ObservableObject {
     }
 
     func stageClipboardJSON(_ text: String, source: String) {
-        logger.info("暂存剪贴板 JSON 输入提示，source=\(source, privacy: .public)，length=\(text.count, privacy: .public)")
+        logger.info("暂存剪贴板 JSON 输入提示，来源 \(source, privacy: .public)，文本长度 \(text.count, privacy: .public)")
         clipboardTextToOffer = text
     }
 
@@ -178,5 +188,7 @@ final class ExternalJSONInputStore: ObservableObject {
 
 extension Notification.Name {
     static let formatJSONRequested = Notification.Name("formatJSONRequested")
+    static let saveJSONPageRequested = Notification.Name("saveJSONPageRequested")
+    static let newJSONPageRequested = Notification.Name("newJSONPageRequested")
     static let findOutputRequested = Notification.Name("findOutputRequested")
 }

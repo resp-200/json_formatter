@@ -348,3 +348,44 @@ import Testing
 
     #expect(formatter.decision(changeCount: 1, text: nil) == .noText)
 }
+
+@Test func workspacePersistenceRoundTripsDocument() throws {
+    let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let fileURL = temporaryDirectory.appendingPathComponent("workspace.json")
+    let pageID = UUID()
+    let selectedPageID = UUID()
+    let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let document = JSONWorkspacePersistenceDocument(
+        version: JSONWorkspacePersistence.documentVersion,
+        pages: [
+            JSONWorkspacePersistencePage(
+                id: pageID,
+                title: "接口响应",
+                inputText: "{\"a\":1}",
+                outputText: "{\n  \"a\" : 1\n}",
+                errorMessage: "",
+                queryExpression: ".items",
+                searchQuery: "a",
+                outputDisplayMode: "tree",
+                updatedAt: updatedAt
+            )
+        ],
+        selectedPageID: selectedPageID,
+        nextPageNumber: 4
+    )
+
+    try JSONWorkspacePersistence.save(document, to: fileURL)
+    let restoredDocument = try #require(JSONWorkspacePersistence.loadDocument(from: fileURL))
+
+    #expect(restoredDocument == document)
+    try? FileManager.default.removeItem(at: temporaryDirectory)
+}
+
+@Test func workspacePersistenceReturnsNilForMissingDocument() throws {
+    let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let fileURL = temporaryDirectory.appendingPathComponent("workspace.json")
+
+    let restoredDocument = try JSONWorkspacePersistence.loadDocument(from: fileURL)
+
+    #expect(restoredDocument == nil)
+}
