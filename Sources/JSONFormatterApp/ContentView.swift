@@ -26,6 +26,9 @@ struct ContentView: View {
     @State private var isTransforming = false
     @State private var latestReleaseInfo: LatestReleaseInfo?
     @State private var keyDownMonitor: Any?
+    @State private var pages: [JSONWorkspacePage] = [.initial]
+    @State private var selectedPageID: UUID?
+    @State private var nextPageNumber = 2
 
     @FocusState private var isSearchFocused: Bool
 
@@ -56,6 +59,18 @@ struct ContentView: View {
         }
     }
 
+    private var selectedPage: JSONWorkspacePage? {
+        pages.first { $0.id == activePageID }
+    }
+
+    private var activePageID: UUID {
+        selectedPageID ?? pages.first?.id ?? JSONWorkspacePage.initial.id
+    }
+
+    private var canSaveCurrentPage: Bool {
+        selectedPage != nil
+    }
+
     private var safeActiveMatchIndex: Int {
         guard activeMatchCount > 0 else {
             return 0
@@ -78,13 +93,126 @@ struct ContentView: View {
     }
 
     var body: some View {
+        HSplitView {
+            sidebarView()
+                .frame(minWidth: 190, idealWidth: 220, maxWidth: 280)
+
+            mainEditorView()
+                .frame(minWidth: 720, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(isDarkMode ? .dark : .light)
+        .onAppear {
+            initializePageSelectionIfNeeded()
+            installFindShortcutMonitor()
+            checkLatestRelease()
+        }
+        .onDisappear(perform: removeFindShortcutMonitor)
+        .onChange(of: searchQuery) { _, _ in
+            refreshSearchMatches()
+        }
+        .onChange(of: outputText) { _, _ in
+            refreshSearchMatches()
+        }
+        .onChange(of: outputDisplayMode) { _, _ in
+            refreshSearchMatches()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
+            formatJSON()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveJSONPageRequested)) { _ in
+            saveCurrentPage()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .findOutputRequested)) { _ in
+            openSearch()
+        }
+        .onChange(of: externalInputStore.pendingFormatRequest, initial: true) { _, request in
+            guard let request else {
+                return
+            }
+            acceptExternalJSON(request)
+        }
+    }
+
+    private func sidebarView() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("JSON 页面")
+                    .font(.headline)
+
+                Spacer()
+
+                Button {
+                    createNewPage()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("新建 JSON 页面")
+            }
+
+            Button("保存当前页面") {
+                saveCurrentPage()
+            }
+            .disabled(!canSaveCurrentPage)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(pages) { page in
+                        pageRow(page)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func pageRow(_ page: JSONWorkspacePage) -> some View {
+        Button {
+            selectPage(page)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(page.title)
+                        .font(.body.weight(page.id == activePageID ? .semibold : .regular))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    if page.id == activePageID {
+                        Text("当前")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(page.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(page.id == activePageID ? Color.accentColor.opacity(0.16) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func mainEditorView() -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("JSON 格式化工具")
                         .font(.largeTitle.bold())
 
-                    Text("粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+F 或 Ctrl+F 搜索输出；系统入口支持 URL Scheme、JSON 文件打开和剪贴板自动格式化。")
+                    Text("粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+S 保存到侧边栏；Cmd+F 或 Ctrl+F 搜索输出；系统入口支持 URL Scheme、JSON 文件打开和剪贴板自动格式化。")
                         .foregroundStyle(.secondary)
 
                     HStack(alignment: .center, spacing: 6) {
@@ -192,33 +320,128 @@ struct ContentView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .preferredColorScheme(isDarkMode ? .dark : .light)
-        .onAppear {
-            installFindShortcutMonitor()
-            checkLatestRelease()
+    }
+
+    private func initializePageSelectionIfNeeded() {
+        if selectedPageID == nil {
+            selectedPageID = pages.first?.id
         }
-        .onDisappear(perform: removeFindShortcutMonitor)
-        .onChange(of: searchQuery) { _, _ in
-            refreshSearchMatches()
+        nextPageNumber = max(nextPageNumber, pages.count + 1)
+    }
+
+    private func createNewPage() {
+        saveCurrentPageIfPossible(logReason: "新建页面前保存当前内容")
+        let currentTitle = "页面 \(nextPageNumber)"
+        let page = JSONWorkspacePage(title: currentTitle)
+        nextPageNumber += 1
+        pages.insert(page, at: 0)
+        loadPage(page)
+        logger.info("新建 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，页面标题 \(page.title, privacy: .public)，新页面已放在侧边栏顶部")
+    }
+
+    private func saveCurrentPage() {
+        saveCurrentPageIfPossible(logReason: "保存当前页面")
+    }
+
+    private func saveCurrentPageIfPossible(logReason: String) {
+        initializePageSelectionIfNeeded()
+        let pageID = activePageID
+        let snapshot = currentPageSnapshot()
+
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            let page = JSONWorkspacePage(title: "页面 \(nextPageNumber)", snapshot: snapshot)
+            nextPageNumber += 1
+            pages.insert(page, at: 0)
+            selectedPageID = page.id
+            logger.info("\(logReason, privacy: .public)时创建新的 JSON 页面，页面标识 \(page.id.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
+            return
         }
-        .onChange(of: outputText) { _, _ in
-            refreshSearchMatches()
+
+        pages[pageIndex].snapshot = snapshot
+        pages[pageIndex].updatedAt = Date()
+        logger.info("\(logReason, privacy: .public)成功，页面标识 \(pageID.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
+    }
+
+    private func updateCurrentPageAfterTransform(with output: OutputTransformResult) {
+        let pageID = activePageID
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return
         }
-        .onChange(of: outputDisplayMode) { _, _ in
-            refreshSearchMatches()
+
+        pages[pageIndex].snapshot = JSONWorkspacePageSnapshot(
+            inputText: inputText,
+            outputText: output.text,
+            errorMessage: "",
+            queryExpression: queryExpression,
+            searchQuery: searchQuery,
+            outputDisplayMode: outputDisplayMode,
+            jsonTreeRoot: output.treeRoot,
+            expandedTreeNodeIDs: output.treeRoot.map { [$0.id] } ?? [],
+            outputLineIndex: output.lineIndex
+        )
+        pages[pageIndex].updatedAt = Date()
+    }
+
+    private func updateCurrentPageAfterTransformFailure(_ errorMessage: String) {
+        let pageID = activePageID
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return
         }
-        .onReceive(NotificationCenter.default.publisher(for: .formatJSONRequested)) { _ in
-            formatJSON()
+
+        var snapshot = currentPageSnapshot()
+        snapshot.errorMessage = errorMessage
+        pages[pageIndex].snapshot = snapshot
+        pages[pageIndex].updatedAt = Date()
+    }
+
+    private func currentPageSnapshot() -> JSONWorkspacePageSnapshot {
+        JSONWorkspacePageSnapshot(
+            inputText: inputText,
+            outputText: outputText,
+            errorMessage: errorMessage,
+            queryExpression: queryExpression,
+            searchQuery: searchQuery,
+            outputDisplayMode: outputDisplayMode,
+            jsonTreeRoot: jsonTreeRoot,
+            expandedTreeNodeIDs: expandedTreeNodeIDs,
+            outputLineIndex: outputLineIndex
+        )
+    }
+
+    private func selectPage(_ page: JSONWorkspacePage) {
+        guard page.id != activePageID else {
+            return
         }
-        .onReceive(NotificationCenter.default.publisher(for: .findOutputRequested)) { _ in
-            openSearch()
+
+        saveCurrentPageIfPossible(logReason: "切换页面前保存当前内容")
+        guard let latestPage = pages.first(where: { $0.id == page.id }) else {
+            return
         }
-        .onChange(of: externalInputStore.pendingFormatRequest, initial: true) { _, request in
-            guard let request else {
-                return
-            }
-            acceptExternalJSON(request)
-        }
+
+        loadPage(latestPage)
+        logger.info("切换 JSON 页面成功，页面标识 \(latestPage.id.uuidString, privacy: .public)，页面标题 \(latestPage.title, privacy: .public)")
+    }
+
+    private func loadPage(_ page: JSONWorkspacePage) {
+        selectedPageID = page.id
+        activeTransformID = nil
+        isTransforming = false
+        inputText = page.snapshot.inputText
+        outputText = page.snapshot.outputText
+        errorMessage = page.snapshot.errorMessage
+        queryExpression = page.snapshot.queryExpression
+        searchQuery = page.snapshot.searchQuery
+        currentMatchIndex = 0
+        outputMatchRanges = []
+        treeSearchMatches = []
+        outputDisplayMode = page.snapshot.outputDisplayMode
+        jsonTreeRoot = page.snapshot.jsonTreeRoot
+        expandedTreeNodeIDs = page.snapshot.expandedTreeNodeIDs
+        outputLineIndex = page.snapshot.outputLineIndex
+        isOutputSearchSkippedForSize = page.snapshot.outputLineIndex.isVirtualized && page.snapshot.outputDisplayMode == .text
+        outputRenderRevision += 1
+        outputScrollRevision += 1
+        refreshSearchMatches()
     }
 
     private func clipboardImportBanner(_ clipboardText: String) -> some View {
@@ -450,13 +673,16 @@ struct ContentView: View {
                     outputText = output.text
                     jsonTreeRoot = output.treeRoot
                     expandedTreeNodeIDs = output.treeRoot.map { [$0.id] } ?? []
+                    updateCurrentPageAfterTransform(with: output)
                     outputRenderRevision += 1
                     if copyAfterSuccess {
                         copyToPasteboard(output.text, actionName: actionName)
                     }
                     logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(output.text.count, privacy: .public)，大文件虚拟化 \(output.lineIndex.isVirtualized, privacy: .public)")
                 case .failure(let error):
-                    errorMessage = "\(actionName)失败：\(error.localizedDescription)"
+                    let message = "\(actionName)失败：\(error.localizedDescription)"
+                    errorMessage = message
+                    updateCurrentPageAfterTransformFailure(message)
                     logger.error("JSON \(actionName, privacy: .public) 失败，输入长度 \(input.count, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -464,6 +690,7 @@ struct ContentView: View {
     }
 
     private func acceptExternalJSON(_ request: ExternalJSONInputRequest) {
+        saveCurrentPageIfPossible(logReason: "接收外部输入前保存当前内容")
         inputText = request.text
         externalInputStore.clearClipboardOffer()
         formatJSON()
@@ -493,6 +720,7 @@ struct ContentView: View {
         outputLineIndex = .empty
         jsonTreeRoot = nil
         expandedTreeNodeIDs = []
+        outputDisplayMode = .text
         activeTransformID = nil
         isTransforming = false
         outputRenderRevision += 1
@@ -645,7 +873,7 @@ struct ContentView: View {
 
     private func openLatestReleasePage() {
         let url = latestReleaseInfo?.htmlURL ?? ReleaseVersionChecker.releasesPageURL
-        logger.info("打开 GitHub Releases 页面，url=\(url.absoluteString, privacy: .public)")
+        logger.info("打开 GitHub Releases 页面，页面地址 \(url.absoluteString, privacy: .public)")
         NSWorkspace.shared.open(url)
     }
 
@@ -1292,6 +1520,55 @@ private enum OutputDisplayMode: String, CaseIterable, Identifiable {
             return "树状"
         }
     }
+}
+
+private struct JSONWorkspacePage: Identifiable, Equatable {
+    static let initial = JSONWorkspacePage(title: "页面 1")
+
+    let id: UUID
+    var title: String
+    var snapshot: JSONWorkspacePageSnapshot
+    var updatedAt: Date
+
+    var subtitle: String {
+        let text = snapshot.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            return text.replacingOccurrences(of: "\n", with: " ")
+        }
+
+        return "空白页面"
+    }
+
+    init(id: UUID = UUID(), title: String, snapshot: JSONWorkspacePageSnapshot = .empty, updatedAt: Date = Date()) {
+        self.id = id
+        self.title = title
+        self.snapshot = snapshot
+        self.updatedAt = updatedAt
+    }
+}
+
+private struct JSONWorkspacePageSnapshot: Equatable {
+    static let empty = JSONWorkspacePageSnapshot(
+        inputText: "",
+        outputText: "",
+        errorMessage: "",
+        queryExpression: "",
+        searchQuery: "",
+        outputDisplayMode: .text,
+        jsonTreeRoot: nil,
+        expandedTreeNodeIDs: [],
+        outputLineIndex: .empty
+    )
+
+    var inputText: String
+    var outputText: String
+    var errorMessage: String
+    var queryExpression: String
+    var searchQuery: String
+    var outputDisplayMode: OutputDisplayMode
+    var jsonTreeRoot: JSONTreeNode?
+    var expandedTreeNodeIDs: Set<String>
+    var outputLineIndex: OutputLineIndex
 }
 
 private struct OutputTransformResult: Sendable {
