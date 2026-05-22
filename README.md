@@ -51,6 +51,13 @@ $.items.length
 
 ## Changelog
 
+### JSON Formatter 1.0.8
+
+- 侧边栏支持收缩，减少编辑 JSON 时的界面占用。
+- 支持多 JSON tab，并可新增、删除和重命名 tab。
+- 修正 `Command+T` 新建 tab 行为，支持 `Command+S` 保存当前工作区。
+- 自动持久化保存 JSON tab 与侧边栏状态，重启后可继续上次工作。
+
 ### JSON Formatter 1.0.7
 
 - Continued improvements to release manifest compatibility and update detection.
