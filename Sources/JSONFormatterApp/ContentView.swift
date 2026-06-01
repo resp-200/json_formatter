@@ -34,7 +34,6 @@ struct ContentView: View {
     @State private var editingPageTitle = ""
     @State private var didLoadPersistedWorkspace = false
     @State private var isLoadingPageSnapshot = false
-    @State private var persistenceSaveTask: Task<Void, Never>?
 
     @FocusState private var isSearchFocused: Bool
 
@@ -119,7 +118,6 @@ struct ContentView: View {
             checkLatestRelease()
         }
         .onDisappear {
-            persistWorkspaceNow(reason: "窗口关闭前保存 JSON 页面")
             removeFindShortcutMonitor()
         }
         .onChange(of: inputText) { _, _ in
@@ -275,6 +273,10 @@ struct ContentView: View {
                                     .font(.body.weight(isActive ? .semibold : .regular))
                                     .lineLimit(1)
 
+                                if page.isUnsaved {
+                                    unsavedPageBadge()
+                                }
+
                                 Spacer(minLength: 4)
 
                                 if isActive {
@@ -331,15 +333,34 @@ struct ContentView: View {
         Button {
             selectPage(page)
         } label: {
-            Text(page.shortTitle)
-                .font(.caption.weight(page.id == activePageID ? .bold : .regular))
-                .foregroundStyle(page.id == activePageID ? .white : .primary)
-                .frame(width: 36, height: 32)
-                .background(page.id == activePageID ? Color.accentColor : Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            ZStack(alignment: .topTrailing) {
+                Text(page.shortTitle)
+                    .font(.caption.weight(page.id == activePageID ? .bold : .regular))
+                    .foregroundStyle(page.id == activePageID ? .white : .primary)
+                    .frame(width: 36, height: 32)
+                    .background(page.id == activePageID ? Color.accentColor : Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                if page.isUnsaved {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 8, height: 8)
+                        .offset(x: 3, y: -3)
+                }
+            }
         }
         .buttonStyle(.plain)
-        .help(page.title)
+        .help(page.isUnsaved ? "\(page.title)（未保存）" : page.title)
+    }
+
+    private func unsavedPageBadge() -> some View {
+        Text("未保存")
+            .font(.caption2)
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Color.orange.opacity(0.12))
+            .clipShape(Capsule())
     }
 
     private func mainEditorView() -> some View {
@@ -471,40 +492,38 @@ struct ContentView: View {
     }
 
     private func createNewPage() {
-        saveCurrentPageIfPossible(logReason: "新建页面前保存当前内容")
+        updateCurrentPageForUnsavedChanges()
         let currentTitle = "页面 \(nextPageNumber)"
         let page = JSONWorkspacePage(title: currentTitle)
         nextPageNumber += 1
         pages.insert(page, at: 0)
         loadPage(page)
-        persistWorkspaceSoon(reason: "新建 JSON 页面后保存工作区")
         logger.info("新建 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，页面标题 \(page.title, privacy: .public)，新页面已放在侧边栏顶部")
     }
 
     private func saveCurrentPage() {
-        saveCurrentPageIfPossible(logReason: "保存当前页面")
-        persistWorkspaceNow(reason: "用户手动保存当前 JSON 页面")
-    }
-
-    private func saveCurrentPageIfPossible(logReason: String) {
         initializePageSelectionIfNeeded()
         let pageID = activePageID
         let snapshot = currentPageSnapshot()
 
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
-            let page = JSONWorkspacePage(title: "页面 \(nextPageNumber)", snapshot: snapshot)
+            let savedAt = Date()
+            var page = JSONWorkspacePage(title: "页面 \(nextPageNumber)", snapshot: snapshot, updatedAt: savedAt)
+            page.markSaved(at: savedAt)
             nextPageNumber += 1
             pages.insert(page, at: 0)
             selectedPageID = page.id
-            persistWorkspaceSoon(reason: "保存页面时补建 JSON 页面")
-            logger.info("\(logReason, privacy: .public)时创建新的 JSON 页面，页面标识 \(page.id.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
+            persistWorkspaceNow(reason: "用户手动保存补建 JSON 页面")
+            logger.info("保存当前页面时创建新的 JSON 页面，页面标识 \(page.id.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
             return
         }
 
+        let savedAt = Date()
         pages[pageIndex].snapshot = snapshot
-        pages[pageIndex].updatedAt = Date()
-        persistWorkspaceSoon(reason: logReason)
-        logger.info("\(logReason, privacy: .public)成功，页面标识 \(pageID.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
+        pages[pageIndex].updatedAt = savedAt
+        pages[pageIndex].markSaved(at: savedAt)
+        persistWorkspaceNow(reason: "用户手动保存当前 JSON 页面")
+        logger.info("保存当前页面成功，页面标识 \(pageID.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
     }
 
     private func updateCurrentPageForTextEditing() {
@@ -512,6 +531,10 @@ struct ContentView: View {
             return
         }
 
+        updateCurrentPageForUnsavedChanges()
+    }
+
+    private func updateCurrentPageForUnsavedChanges() {
         initializePageSelectionIfNeeded()
         let pageID = activePageID
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
@@ -520,7 +543,6 @@ struct ContentView: View {
 
         pages[pageIndex].snapshot = currentPageSnapshot()
         pages[pageIndex].updatedAt = Date()
-        persistWorkspaceSoon(reason: "编辑 JSON 页面内容后保存工作区")
     }
 
     private func toggleSidebarCollapsed() {
@@ -546,7 +568,6 @@ struct ContentView: View {
         pages[pageIndex].updatedAt = Date()
         editingPageID = nil
         editingPageTitle = ""
-        persistWorkspaceSoon(reason: "重命名 JSON 页面后保存工作区")
         logger.info("重命名 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，页面标题 \(nextTitle, privacy: .public)")
     }
 
@@ -578,7 +599,7 @@ struct ContentView: View {
             initializePageSelectionIfNeeded()
         }
 
-        persistWorkspaceSoon(reason: "删除 JSON 页面后保存工作区")
+        persistWorkspaceNow(reason: "删除 JSON 页面后保存工作区")
         logger.info("删除 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，剩余页面数 \(pages.count, privacy: .public)")
     }
 
@@ -600,7 +621,6 @@ struct ContentView: View {
             outputLineIndex: output.lineIndex
         )
         pages[pageIndex].updatedAt = Date()
-        persistWorkspaceSoon(reason: "JSON 转换成功后保存工作区")
     }
 
     private func updateCurrentPageAfterTransformFailure(_ errorMessage: String) {
@@ -613,7 +633,6 @@ struct ContentView: View {
         snapshot.errorMessage = errorMessage
         pages[pageIndex].snapshot = snapshot
         pages[pageIndex].updatedAt = Date()
-        persistWorkspaceSoon(reason: "JSON 转换失败后保存工作区")
     }
 
     private func currentPageSnapshot() -> JSONWorkspacePageSnapshot {
@@ -635,13 +654,12 @@ struct ContentView: View {
             return
         }
 
-        saveCurrentPageIfPossible(logReason: "切换页面前保存当前内容")
+        updateCurrentPageForUnsavedChanges()
         guard let latestPage = pages.first(where: { $0.id == page.id }) else {
             return
         }
 
         loadPage(latestPage)
-        persistWorkspaceSoon(reason: "切换 JSON 页面后保存工作区")
         logger.info("切换 JSON 页面成功，页面标识 \(latestPage.id.uuidString, privacy: .public)，页面标题 \(latestPage.title, privacy: .public)")
     }
 
@@ -703,39 +721,11 @@ struct ContentView: View {
         }
     }
 
-    private func persistWorkspaceSoon(reason: String) {
-        guard didLoadPersistedWorkspace else {
-            return
-        }
-
-        persistenceSaveTask?.cancel()
-        let document = persistenceDocument()
-        persistenceSaveTask = Task.detached(priority: .utility) { [document, reason] in
-            do {
-                try await Task.sleep(for: .milliseconds(450))
-                guard !Task.isCancelled else {
-                    return
-                }
-                try JSONWorkspacePersistence.save(document)
-                await MainActor.run {
-                    logger.info("持久化 JSON 工作区成功，原因 \(reason, privacy: .public)，页面数 \(document.pages.count, privacy: .public)")
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                await MainActor.run {
-                    logger.error("持久化 JSON 工作区失败，原因 \(reason, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
-                }
-            }
-        }
-    }
-
     private func persistWorkspaceNow(reason: String) {
         guard didLoadPersistedWorkspace else {
             return
         }
 
-        persistenceSaveTask?.cancel()
         do {
             let document = persistenceDocument()
             try JSONWorkspacePersistence.save(document)
@@ -1000,7 +990,15 @@ struct ContentView: View {
     }
 
     private func acceptExternalJSON(_ request: ExternalJSONInputRequest) {
-        saveCurrentPageIfPossible(logReason: "接收外部输入前保存当前内容")
+        loadPersistedWorkspaceIfNeeded()
+
+        if request.opensInNewPage {
+            createNewPage()
+            logger.info("外部 JSON 输入已打开到新页面，来源 \(request.source, privacy: .public)，页面标识 \(activePageID.uuidString, privacy: .public)")
+        } else {
+            updateCurrentPageForUnsavedChanges()
+        }
+
         inputText = request.text
         externalInputStore.clearClipboardOffer()
         formatJSON()
@@ -1840,6 +1838,12 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
     var title: String
     var snapshot: JSONWorkspacePageSnapshot
     var updatedAt: Date
+    private var savedSnapshot: JSONWorkspacePageSnapshot
+    private var savedTitle: String
+
+    var isUnsaved: Bool {
+        title != savedTitle || snapshot != savedSnapshot
+    }
 
     var subtitle: String {
         let text = snapshot.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1881,11 +1885,24 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
         )
     }
 
-    init(id: UUID = UUID(), title: String, snapshot: JSONWorkspacePageSnapshot = .empty, updatedAt: Date = Date()) {
+    init(
+        id: UUID = UUID(),
+        title: String,
+        snapshot: JSONWorkspacePageSnapshot = .empty,
+        updatedAt: Date = Date()
+    ) {
         self.id = id
         self.title = title
         self.snapshot = snapshot
         self.updatedAt = updatedAt
+        self.savedSnapshot = snapshot
+        self.savedTitle = title
+    }
+
+    mutating func markSaved(at date: Date = Date()) {
+        savedTitle = title
+        savedSnapshot = snapshot
+        updatedAt = date
     }
 
     init(persistencePage: JSONWorkspacePersistencePage) {

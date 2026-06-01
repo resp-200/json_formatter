@@ -125,7 +125,7 @@ final class JSONFormatterAppDelegate: NSObject, NSApplicationDelegate {
         switch clipboardAutoFormatter.decision(changeCount: changeCount, text: text) {
         case .shouldFormat(let text):
             logger.info("自动格式化剪贴板 JSON，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)，文本长度 \(text.count, privacy: .public)")
-            externalInputStore.requestFormat(text, source: source)
+            externalInputStore.requestFormat(text, source: source, opensInNewPage: true)
         case .duplicateChangeCount:
             logger.info("跳过重复剪贴板内容，来源 \(source, privacy: .public)，剪贴板变更次数 \(changeCount, privacy: .public)")
         case .noText:
@@ -141,6 +141,14 @@ final class JSONFormatterAppDelegate: NSObject, NSApplicationDelegate {
 struct ExternalJSONInputRequest: Equatable, Identifiable {
     let id = UUID()
     let text: String
+    let source: String
+    let opensInNewPage: Bool
+
+    init(text: String, source: String, opensInNewPage: Bool = false) {
+        self.text = text
+        self.source = source
+        self.opensInNewPage = opensInNewPage
+    }
 }
 
 @MainActor
@@ -155,11 +163,11 @@ final class ExternalJSONInputStore: ObservableObject {
 
     private init() {}
 
-    func requestFormat(_ text: String, source: String) {
+    func requestFormat(_ text: String, source: String, opensInNewPage: Bool = false) {
         logger.info("收到外部 JSON 输入，来源 \(source, privacy: .public)，文本长度 \(text.count, privacy: .public)")
         NSApp.activate(ignoringOtherApps: true)
 
-        let request = ExternalJSONInputRequest(text: text)
+        let request = ExternalJSONInputRequest(text: text, source: source, opensInNewPage: opensInNewPage)
         if pendingFormatRequest == nil {
             pendingFormatRequest = request
         } else {
