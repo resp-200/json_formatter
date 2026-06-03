@@ -153,3 +153,4 @@ After installation, select text and choose `Format JSON` from the macOS Services
 ```bash
 /System/Library/CoreServices/pbs -flush
 ```
+<center>This project has been shared on the [LINUX DO](https://linux.do).</center>

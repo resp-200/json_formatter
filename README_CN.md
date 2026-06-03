@@ -153,3 +153,10 @@ open -a "JSON Formatter" --args '{"a":1}'
 ```bash
 /System/Library/CoreServices/pbs -flush
 ```
+
+
+
+
+
+<center>该项目已在 [LINUX DO](https://linux.do) 社区分享。</center>
+
