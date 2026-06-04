@@ -3,6 +3,9 @@ import JavaScriptCore
 import OSLog
 
 public enum JSONFormatterService {
+    private static let logger = Logger(subsystem: "local.json-formatter.app", category: "JSONFormatterService")
+    private static let decimalNumberParsingLocale = Locale(identifier: "en_US_POSIX")
+
     public static func format(_ input: String) throws -> String {
         try transformForFormatting(input, options: [.prettyPrinted, .sortedKeys, .fragmentsAllowed])
     }
@@ -57,16 +60,16 @@ public enum JSONFormatterService {
     ) throws -> Any {
         do {
             return try parseStrict(input, postParseTransform: postParseTransform)
-        } catch {
+        } catch let strictParseError {
             let normalizedInput = normalizeSmartQuotes(input)
             guard normalizedInput != input else {
-                throw error
+                throw strictParseError
             }
 
             do {
                 return try parseStrict(normalizedInput, postParseTransform: postParseTransform)
             } catch {
-                throw error
+                throw strictParseError
             }
         }
     }
@@ -81,13 +84,72 @@ public enum JSONFormatterService {
     }
 
     private static func serialize(_ jsonObject: Any, options: JSONSerialization.WritingOptions) throws -> String {
-        let outputData = try JSONSerialization.data(withJSONObject: jsonObject, options: options)
+        let normalizedObject = readableDecimalNumberValue(jsonObject)
+        let outputData = try JSONSerialization.data(withJSONObject: normalizedObject, options: options)
 
         guard let output = String(data: outputData, encoding: .utf8) else {
             throw JSONFormatterError.encodingFailed
         }
 
         return output
+    }
+
+    private static func readableDecimalNumberValue(_ value: Any) -> Any {
+        switch value {
+        case let dictionary as [String: Any]:
+            var normalizedDictionary: [String: Any] = [:]
+            for (key, value) in dictionary {
+                normalizedDictionary[key] = readableDecimalNumberValue(value)
+            }
+            return normalizedDictionary
+        case let dictionary as NSDictionary:
+            var normalizedDictionary: [String: Any] = [:]
+            for (key, value) in dictionary {
+                guard let key = key as? String else {
+                    return dictionary
+                }
+                normalizedDictionary[key] = readableDecimalNumberValue(value)
+            }
+            return normalizedDictionary
+        case let array as [Any]:
+            return array.map(readableDecimalNumberValue)
+        case let array as NSArray:
+            return array.map { readableDecimalNumberValue($0) }
+        case let number as NSDecimalNumber:
+            return number
+        case let number as NSNumber:
+            return readableDecimalNumber(from: number) ?? number
+        default:
+            return value
+        }
+    }
+
+    private static func readableDecimalNumber(from number: NSNumber) -> NSDecimalNumber? {
+        guard !isBooleanNumber(number), isFloatingPointNumber(number) else {
+            return nil
+        }
+
+        let readableNumberText = String(number.doubleValue)
+        let decimalNumber = NSDecimalNumber(string: readableNumberText, locale: decimalNumberParsingLocale)
+        guard !decimalNumber.isEqual(to: NSDecimalNumber.notANumber) else {
+            logger.info("JSON 浮点数可读格式归一化跳过，原始值无法转换为十进制表示，数值类型 \(CFNumberGetType(number).rawValue, privacy: .public)")
+            return nil
+        }
+
+        return decimalNumber
+    }
+
+    private static func isBooleanNumber(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    private static func isFloatingPointNumber(_ number: NSNumber) -> Bool {
+        switch CFNumberGetType(number) {
+        case .floatType, .float32Type, .doubleType, .float64Type, .cgFloatType:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func decodedEscapedJSONIfNeeded(_ jsonObject: Any) throws -> Any {

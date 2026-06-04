@@ -32,10 +32,12 @@ struct ContentView: View {
     @State private var nextPageNumber = 2
     @State private var editingPageID: UUID?
     @State private var editingPageTitle = ""
+    @State private var editingOriginalPageTitle = ""
     @State private var didLoadPersistedWorkspace = false
     @State private var isLoadingPageSnapshot = false
 
     @FocusState private var isSearchFocused: Bool
+    @FocusState private var focusedEditingPageID: UUID?
 
     private static let logger = Logger(subsystem: "local.json-formatter.app", category: "ContentView")
     private let logger = ContentView.logger
@@ -260,40 +262,37 @@ struct ContentView: View {
                 if isEditing {
                     TextField("页面名称", text: $editingPageTitle)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedEditingPageID, equals: page.id)
                         .onSubmit {
                             commitPageTitleEditing(page)
                         }
                 } else {
-                    Button {
-                        selectPage(page)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 6) {
-                                Text(page.title)
-                                    .font(.body.weight(isActive ? .semibold : .regular))
-                                    .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(page.title)
+                                .font(.body.weight(isActive ? .semibold : .regular))
+                                .lineLimit(1)
 
-                                if page.isUnsaved {
-                                    unsavedPageBadge()
-                                }
-
-                                Spacer(minLength: 4)
-
-                                if isActive {
-                                    Text("当前")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
+                            if page.isUnsaved {
+                                unsavedPageBadge()
                             }
 
-                            Text(page.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
+                            Spacer(minLength: 4)
+
+                            if isActive {
+                                Text("当前")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(page.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
-                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .allowsHitTesting(false)
                 }
             }
 
@@ -305,7 +304,7 @@ struct ContentView: View {
                     .buttonStyle(.borderless)
 
                     Button("取消") {
-                        cancelPageTitleEditing()
+                        cancelPageTitleEditing(page)
                     }
                     .buttonStyle(.borderless)
                 } else {
@@ -325,8 +324,35 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isActive ? Color.accentColor.opacity(0.16) : Color.clear)
+        .background {
+            if isEditing {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive ? Color.accentColor.opacity(0.16) : Color.clear)
+            } else {
+                Button {
+                    selectPage(page)
+                } label: {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isActive ? Color.accentColor.opacity(0.16) : Color.clear)
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onChange(of: focusedEditingPageID) { previousPageID, nextPageID in
+            guard previousPageID == page.id, nextPageID != page.id else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard editingPageID == page.id, focusedEditingPageID != page.id else {
+                    return
+                }
+
+                commitPageTitleEditing(page)
+            }
+        }
     }
 
     private func collapsedPageButton(_ page: JSONWorkspacePage) -> some View {
@@ -551,29 +577,57 @@ struct ContentView: View {
     }
 
     private func beginPageTitleEditing(_ page: JSONWorkspacePage) {
+        if let editingPageID, editingPageID != page.id,
+           let editingPage = pages.first(where: { $0.id == editingPageID }) {
+            commitPageTitleEditing(editingPage)
+        }
+
         editingPageID = page.id
         editingPageTitle = page.title
+        editingOriginalPageTitle = page.title
+        focusedEditingPageID = page.id
         logger.info("开始重命名 JSON 页面，页面标识 \(page.id.uuidString, privacy: .public)")
     }
 
     private func commitPageTitleEditing(_ page: JSONWorkspacePage) {
-        let normalizedTitle = editingPageTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nextTitle = normalizedTitle.isEmpty ? page.title : normalizedTitle
-        guard let pageIndex = pages.firstIndex(where: { $0.id == page.id }) else {
-            cancelPageTitleEditing()
+        guard editingPageID == page.id else {
             return
         }
 
+        let normalizedTitle = editingPageTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pageIndex = pages.firstIndex(where: { $0.id == page.id }) else {
+            clearPageTitleEditingState()
+            return
+        }
+
+        let currentTitle = pages[pageIndex].title
+        let nextTitle = normalizedTitle.isEmpty ? currentTitle : normalizedTitle
+        guard nextTitle != currentTitle else {
+            clearPageTitleEditingState()
+            logger.info("重命名 JSON 页面未产生标题变更，跳过工作区持久化，页面标识 \(page.id.uuidString, privacy: .public)")
+            return
+        }
+
+        let renamedAt = Date()
         pages[pageIndex].title = nextTitle
-        pages[pageIndex].updatedAt = Date()
-        editingPageID = nil
-        editingPageTitle = ""
+        pages[pageIndex].markTitleSaved(at: renamedAt)
+        clearPageTitleEditingState()
+        persistWorkspaceNow(reason: "重命名 JSON 页面后保存工作区", includesUnsavedPageSnapshots: false)
         logger.info("重命名 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，页面标题 \(nextTitle, privacy: .public)")
     }
 
-    private func cancelPageTitleEditing() {
+    private func cancelPageTitleEditing(_ page: JSONWorkspacePage? = nil) {
+        if let page, editingPageID == page.id, let pageIndex = pages.firstIndex(where: { $0.id == page.id }) {
+            pages[pageIndex].title = editingOriginalPageTitle.isEmpty ? page.title : editingOriginalPageTitle
+        }
+        clearPageTitleEditingState()
+    }
+
+    private func clearPageTitleEditingState() {
         editingPageID = nil
         editingPageTitle = ""
+        editingOriginalPageTitle = ""
+        focusedEditingPageID = nil
     }
 
     private func deletePage(_ page: JSONWorkspacePage) {
@@ -721,13 +775,15 @@ struct ContentView: View {
         }
     }
 
-    private func persistWorkspaceNow(reason: String) {
+    private func persistWorkspaceNow(reason: String, includesUnsavedPageSnapshots: Bool = true) {
         guard didLoadPersistedWorkspace else {
             return
         }
 
         do {
-            let document = persistenceDocument()
+            let document = includesUnsavedPageSnapshots
+                ? persistenceDocument()
+                : persistenceDocumentPreservingUnsavedSnapshots()
             try JSONWorkspacePersistence.save(document)
             logger.info("立即持久化 JSON 工作区成功，原因 \(reason, privacy: .public)，页面数 \(document.pages.count, privacy: .public)")
         } catch {
@@ -739,6 +795,17 @@ struct ContentView: View {
         JSONWorkspacePersistenceDocument(
             version: JSONWorkspacePersistence.documentVersion,
             pages: pages.map(\.persistencePage),
+            selectedPageID: selectedPageID,
+            nextPageNumber: nextPageNumber
+        )
+    }
+
+    private func persistenceDocumentPreservingUnsavedSnapshots() -> JSONWorkspacePersistenceDocument {
+        JSONWorkspacePersistenceDocument(
+            version: JSONWorkspacePersistence.documentVersion,
+            pages: pages.map { page in
+                page.hasUnsavedSnapshot ? page.savedSnapshotPersistencePage : page.persistencePage
+            },
             selectedPageID: selectedPageID,
             nextPageNumber: nextPageNumber
         )
@@ -1840,9 +1907,14 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
     var updatedAt: Date
     private var savedSnapshot: JSONWorkspacePageSnapshot
     private var savedTitle: String
+    private var savedUpdatedAt: Date
 
     var isUnsaved: Bool {
         title != savedTitle || snapshot != savedSnapshot
+    }
+
+    var hasUnsavedSnapshot: Bool {
+        snapshot != savedSnapshot
     }
 
     var subtitle: String {
@@ -1872,6 +1944,14 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
     }
 
     var persistencePage: JSONWorkspacePersistencePage {
+        persistencePage(for: snapshot, updatedAt: updatedAt)
+    }
+
+    var savedSnapshotPersistencePage: JSONWorkspacePersistencePage {
+        persistencePage(for: savedSnapshot, updatedAt: savedUpdatedAt)
+    }
+
+    private func persistencePage(for snapshot: JSONWorkspacePageSnapshot, updatedAt: Date) -> JSONWorkspacePersistencePage {
         JSONWorkspacePersistencePage(
             id: id,
             title: title,
@@ -1897,12 +1977,20 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
         self.updatedAt = updatedAt
         self.savedSnapshot = snapshot
         self.savedTitle = title
+        self.savedUpdatedAt = updatedAt
     }
 
     mutating func markSaved(at date: Date = Date()) {
         savedTitle = title
         savedSnapshot = snapshot
         updatedAt = date
+        savedUpdatedAt = date
+    }
+
+    mutating func markTitleSaved(at date: Date = Date()) {
+        savedTitle = title
+        updatedAt = date
+        savedUpdatedAt = date
     }
 
     init(persistencePage: JSONWorkspacePersistencePage) {

@@ -50,6 +50,33 @@ import Testing
     #expect(output == "\"hello\"")
 }
 
+@Test func formatDecimalNumbersKeepsReadablePrecision() throws {
+    let input = """
+    {
+        "request": {
+            "modelId": 17903,
+            "cateId": 1100000172,
+            "brandId": 11499,
+            "latitude": 39.91,
+            "longitude": 116.40
+        }
+    }
+    """
+
+    let output = try JSONFormatterService.format(input)
+
+    #expect(output.contains("    \"latitude\" : 39.91"))
+    #expect(output.contains("    \"longitude\" : 116.4"))
+    #expect(!output.contains("39.909999999999997"))
+    #expect(!output.contains("116.40000000000001"))
+}
+
+@Test func compactDecimalNumbersKeepsReadablePrecision() throws {
+    let output = try JSONFormatterService.compact("{\"latitude\":39.91,\"longitude\":116.40}")
+
+    #expect(output == "{\"latitude\":39.91,\"longitude\":116.4}")
+}
+
 @Test func compactDoesNotDecodeEscapedJSONString() throws {
     let output = try JSONFormatterService.compact("\"{\\\"b\\\":2,\\\"a\\\":1}\"")
 
