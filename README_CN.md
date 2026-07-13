@@ -2,12 +2,13 @@
 
 [English](README.md) | 简体中文
 
-一款本地运行的 macOS SwiftUI JSON 格式化工具，支持格式化、压缩、转义、树形浏览、搜索、JS 表达式处理和多种外部输入方式。
+一款本地运行的 macOS SwiftUI JSON 格式化与对比工具，支持格式化、压缩、转义、语义化 JSON Diff、树形浏览、搜索、JS 表达式处理和多种外部输入方式。
 
 ## 功能
 
 - 输入 JSON 后按 `Cmd+Enter` 格式化，普通 `Enter` 保留为换行。
 - 支持格式化、压缩、转义、转义并复制 JSON、复制结果、清空。
+- JSON Diff 模式支持左右两份 JSON 同时编辑；任意层级的对象键顺序不同不会产生差异，数组顺序仍参与比较，并以稳定 JSON 路径展示新增、删除和值变化。
 - 支持将 JSON 转义字符串格式化为解码后的对象或数组；若字符串内容不是合法 JSON，则保持 JSON 字符串行为。
 - 格式化时支持智能双引号兼容兜底，减少从富文本环境复制 JSON 时的失败概率。
 - 输出支持文本视图和树形视图。
@@ -32,7 +33,7 @@
 
 ## 快捷键与常用操作
 
-- `Cmd+Enter`：格式化输入 JSON。
+- `Cmd+Enter`：格式化输入 JSON；在 JSON Diff 模式下比较左右两份 JSON。
 - `Enter`：在输入框内换行。
 - `Cmd+F` / `Ctrl+F`：搜索输出内容。
 - 文本输出和树形输出都可配合搜索使用。
@@ -173,4 +174,3 @@ open -a "JSON Formatter" --args '{"a":1}'
 
 
 <center>该项目已在 [LINUX DO](https://linux.do) 社区分享。</center>
-

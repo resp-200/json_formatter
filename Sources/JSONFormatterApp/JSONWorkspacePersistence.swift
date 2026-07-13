@@ -12,6 +12,8 @@ struct JSONWorkspacePersistencePage: Codable, Equatable, Sendable {
     var title: String
     var inputText: String
     var outputText: String
+    var workspaceMode: String? = nil
+    var diffRightText: String? = nil
     var errorMessage: String
     var queryExpression: String
     var searchQuery: String

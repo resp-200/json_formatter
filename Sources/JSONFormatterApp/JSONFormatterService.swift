@@ -32,6 +32,33 @@ public enum JSONFormatterService {
         return try serialize(evaluatedObject, options: [.prettyPrinted, .sortedKeys, .fragmentsAllowed])
     }
 
+    public static func diff(_ leftInput: String, _ rightInput: String) throws -> JSONDiffResult {
+        guard !leftInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw JSONDiffError.invalidLeftJSON("内容为空")
+        }
+        guard !rightInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw JSONDiffError.invalidRightJSON("内容为空")
+        }
+
+        let leftObject: Any
+        do {
+            leftObject = try parse(leftInput, postParseTransform: { $0 })
+        } catch {
+            throw JSONDiffError.invalidLeftJSON(error.localizedDescription)
+        }
+
+        let rightObject: Any
+        do {
+            rightObject = try parse(rightInput, postParseTransform: { $0 })
+        } catch {
+            throw JSONDiffError.invalidRightJSON(error.localizedDescription)
+        }
+
+        var differences: [JSONDifference] = []
+        try collectDifferences(left: leftObject, right: rightObject, path: "$", into: &differences)
+        return JSONDiffResult(differences: differences)
+    }
+
     private static func transform(_ input: String, options: JSONSerialization.WritingOptions) throws -> String {
         let jsonObject = try parse(input, postParseTransform: { $0 })
         return try serialize(jsonObject, options: options)
@@ -188,6 +215,184 @@ public enum JSONFormatterService {
         input
             .replacingOccurrences(of: "\u{201C}", with: "\"")
             .replacingOccurrences(of: "\u{201D}", with: "\"")
+    }
+
+    private static func collectDifferences(
+        left: Any,
+        right: Any,
+        path: String,
+        into differences: inout [JSONDifference]
+    ) throws {
+        if let leftObject = stringKeyedDictionary(left), let rightObject = stringKeyedDictionary(right) {
+            let allKeys = Set(leftObject.keys).union(rightObject.keys).sorted()
+            for key in allKeys {
+                let childPath = jsonPath(path, appendingKey: key)
+                switch (leftObject[key], rightObject[key]) {
+                case (.some(let leftValue), .some(let rightValue)):
+                    try collectDifferences(left: leftValue, right: rightValue, path: childPath, into: &differences)
+                case (.some(let leftValue), .none):
+                    differences.append(JSONDifference(
+                        kind: .removed,
+                        path: childPath,
+                        oldValue: try displayValue(leftValue),
+                        newValue: nil
+                    ))
+                case (.none, .some(let rightValue)):
+                    differences.append(JSONDifference(
+                        kind: .added,
+                        path: childPath,
+                        oldValue: nil,
+                        newValue: try displayValue(rightValue)
+                    ))
+                case (.none, .none):
+                    break
+                }
+            }
+            return
+        }
+
+        if let leftArray = jsonArray(left), let rightArray = jsonArray(right) {
+            let commonCount = min(leftArray.count, rightArray.count)
+            for index in 0..<commonCount {
+                try collectDifferences(
+                    left: leftArray[index],
+                    right: rightArray[index],
+                    path: "\(path)[\(index)]",
+                    into: &differences
+                )
+            }
+            if leftArray.count > commonCount {
+                for index in commonCount..<leftArray.count {
+                    differences.append(JSONDifference(
+                        kind: .removed,
+                        path: "\(path)[\(index)]",
+                        oldValue: try displayValue(leftArray[index]),
+                        newValue: nil
+                    ))
+                }
+            } else if rightArray.count > commonCount {
+                for index in commonCount..<rightArray.count {
+                    differences.append(JSONDifference(
+                        kind: .added,
+                        path: "\(path)[\(index)]",
+                        oldValue: nil,
+                        newValue: try displayValue(rightArray[index])
+                    ))
+                }
+            }
+            return
+        }
+
+        guard scalarValuesAreEqual(left, right) else {
+            differences.append(JSONDifference(
+                kind: .changed,
+                path: path,
+                oldValue: try displayValue(left),
+                newValue: try displayValue(right)
+            ))
+            return
+        }
+    }
+
+    private static func stringKeyedDictionary(_ value: Any) -> [String: Any]? {
+        if let dictionary = value as? [String: Any] {
+            return dictionary
+        }
+        guard let dictionary = value as? NSDictionary else {
+            return nil
+        }
+
+        var result: [String: Any] = [:]
+        for (key, value) in dictionary {
+            guard let key = key as? String else {
+                return nil
+            }
+            result[key] = value
+        }
+        return result
+    }
+
+    private static func jsonArray(_ value: Any) -> [Any]? {
+        if let array = value as? [Any] {
+            return array
+        }
+        return (value as? NSArray)?.map { $0 }
+    }
+
+    private static func scalarValuesAreEqual(_ left: Any, _ right: Any) -> Bool {
+        if left is NSNull || right is NSNull {
+            return left is NSNull && right is NSNull
+        }
+        if let leftString = left as? String, let rightString = right as? String {
+            return leftString == rightString
+        }
+        if let leftNumber = left as? NSNumber, let rightNumber = right as? NSNumber {
+            let leftIsBoolean = isBooleanNumber(leftNumber)
+            let rightIsBoolean = isBooleanNumber(rightNumber)
+            guard leftIsBoolean == rightIsBoolean else {
+                return false
+            }
+            return leftNumber.compare(rightNumber) == .orderedSame
+        }
+        return false
+    }
+
+    private static func displayValue(_ value: Any) throws -> String {
+        try serialize(value, options: [.sortedKeys, .fragmentsAllowed])
+    }
+
+    private static func jsonPath(_ parent: String, appendingKey key: String) -> String {
+        let identifierCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_$"))
+        let isSimpleIdentifier = !key.isEmpty
+            && key.unicodeScalars.allSatisfy { identifierCharacters.contains($0) }
+            && key.unicodeScalars.first.map { !CharacterSet.decimalDigits.contains($0) } == true
+        if isSimpleIdentifier {
+            return "\(parent).\(key)"
+        }
+
+        // JSON encoding also escapes control characters, keeping bracket
+        // segments unambiguous and safe to copy.
+        let encodedKey = (try? serialize(key, options: [.fragmentsAllowed])) ?? "\"\(key)\""
+        return "\(parent)[\(encodedKey)]"
+    }
+}
+
+public struct JSONDiffResult: Equatable, Sendable {
+    public let differences: [JSONDifference]
+
+    public var isIdentical: Bool {
+        differences.isEmpty
+    }
+}
+
+public struct JSONDifference: Equatable, Identifiable, Sendable {
+    public let kind: JSONDifferenceKind
+    public let path: String
+    public let oldValue: String?
+    public let newValue: String?
+
+    public var id: String {
+        "\(kind.rawValue):\(path)"
+    }
+}
+
+public enum JSONDifferenceKind: String, Equatable, Sendable {
+    case added
+    case removed
+    case changed
+}
+
+public enum JSONDiffError: LocalizedError, Equatable {
+    case invalidLeftJSON(String)
+    case invalidRightJSON(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidLeftJSON(let message):
+            return "左侧 JSON 解析失败：\(message)"
+        case .invalidRightJSON(let message):
+            return "右侧 JSON 解析失败：\(message)"
+        }
     }
 }
 

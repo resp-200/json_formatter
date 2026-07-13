@@ -2,6 +2,106 @@ import Foundation
 import Testing
 @testable import JSONFormatterApp
 
+@Test func jsonDiffIgnoresObjectKeyOrderAtEveryLevel() throws {
+    let left = """
+    {"a":1,"nested":{"x":true,"y":[1,2]},"b":2}
+    """
+    let right = """
+    {"b":2,"nested":{"y":[1,2],"x":true},"a":1}
+    """
+
+    let result = try JSONFormatterService.diff(left, right)
+
+    #expect(result.isIdentical)
+    #expect(result.differences.isEmpty)
+}
+
+@Test func jsonDiffPreservesArrayOrder() throws {
+    let result = try JSONFormatterService.diff("{\"items\":[1,2]}", "{\"items\":[2,1]}")
+
+    #expect(!result.isIdentical)
+    #expect(result.differences.map(\.path) == ["$.items[0]", "$.items[1]"])
+    #expect(result.differences.allSatisfy { $0.kind == .changed })
+}
+
+@Test func jsonDiffReportsStableAddedRemovedAndChangedPaths() throws {
+    let left = """
+    {"removed":1,"changed":"old","nested":{"same":true},"array":[1]}
+    """
+    let right = """
+    {"added":2,"changed":"new","nested":{"same":true},"array":[1,3]}
+    """
+
+    let result = try JSONFormatterService.diff(left, right)
+
+    #expect(result.differences.map(\.path) == ["$.added", "$.array[1]", "$.changed", "$.removed"])
+    #expect(result.differences.map(\.kind) == [.added, .added, .changed, .removed])
+    #expect(result.differences[0].newValue == "2")
+    #expect(result.differences[2].oldValue == "\"old\"")
+    #expect(result.differences[2].newValue == "\"new\"")
+    #expect(result.differences[3].oldValue == "1")
+}
+
+@Test func jsonDiffUsesEscapedBracketPathsForNonIdentifierKeys() throws {
+    let result = try JSONFormatterService.diff(
+        "{\"a.b\":1,\"line\\nkey\":true}",
+        "{\"a.b\":2,\"line\\nkey\":false}"
+    )
+
+    #expect(result.differences.map(\.path) == ["$[\"a.b\"]", "$[\"line\\nkey\"]"])
+}
+
+@Test func jsonDiffDistinguishesBooleanNumbersAndContainerTypes() throws {
+    let booleanAndNumber = try JSONFormatterService.diff("true", "1")
+    let objectAndArray = try JSONFormatterService.diff("{}", "[]")
+    let encodedObjectStringAndObject = try JSONFormatterService.diff("\"{\\\"a\\\":1}\"", "{\"a\":1}")
+
+    #expect(booleanAndNumber.differences.map(\.path) == ["$"])
+    #expect(booleanAndNumber.differences[0].oldValue == "true")
+    #expect(booleanAndNumber.differences[0].newValue == "1")
+    #expect(objectAndArray.differences.map(\.path) == ["$"])
+    #expect(objectAndArray.differences[0].oldValue == "{}")
+    #expect(objectAndArray.differences[0].newValue == "[]")
+    #expect(encodedObjectStringAndObject.differences.map(\.path) == ["$"])
+    #expect(encodedObjectStringAndObject.differences[0].oldValue == "\"{\\\"a\\\":1}\"")
+    #expect(encodedObjectStringAndObject.differences[0].newValue == "{\"a\":1}")
+}
+
+@Test func jsonDiffReportsEmptyInputSide() {
+    do {
+        _ = try JSONFormatterService.diff(" \n", "{}")
+        Issue.record("Expected the empty left input to fail")
+    } catch let error as JSONDiffError {
+        #expect(error == .invalidLeftJSON("内容为空"))
+    } catch {
+        Issue.record("Expected JSONDiffError, got \(error)")
+    }
+
+    do {
+        _ = try JSONFormatterService.diff("{}", "\t")
+        Issue.record("Expected the empty right input to fail")
+    } catch let error as JSONDiffError {
+        #expect(error == .invalidRightJSON("内容为空"))
+    } catch {
+        Issue.record("Expected JSONDiffError, got \(error)")
+    }
+}
+
+@Test func jsonDiffIdentifiesTheInvalidInputSide() {
+    #expect(throws: JSONDiffError.self) {
+        try JSONFormatterService.diff("{bad}", "{}")
+    }
+
+    do {
+        _ = try JSONFormatterService.diff("{}", "{bad}")
+        Issue.record("Expected the right-side parse to fail")
+    } catch let error as JSONDiffError {
+        #expect(error.errorDescription?.hasPrefix("右侧 JSON 解析失败") == true)
+    } catch {
+        Issue.record("Expected JSONDiffError, got \(error)")
+    }
+}
+
 @Test func formatObjectJSON() throws {
     let output = try JSONFormatterService.format("{\"b\":2,\"a\":1}")
 
@@ -390,6 +490,8 @@ import Testing
                 title: "接口响应",
                 inputText: "{\"a\":1}",
                 outputText: "{\n  \"a\" : 1\n}",
+                workspaceMode: "diff",
+                diffRightText: "{\"a\":2}",
                 errorMessage: "",
                 queryExpression: ".items",
                 searchQuery: "a",

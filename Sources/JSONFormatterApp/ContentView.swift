@@ -8,6 +8,9 @@ struct ContentView: View {
 
     @State private var inputText = ""
     @State private var outputText = ""
+    @State private var workspaceMode: WorkspaceMode = .format
+    @State private var diffRightText = ""
+    @State private var diffResult: JSONDiffResult?
     @State private var errorMessage = ""
     @State private var isSearchVisible = false
     @State private var searchQuery = ""
@@ -123,6 +126,24 @@ struct ContentView: View {
             removeFindShortcutMonitor()
         }
         .onChange(of: inputText) { _, _ in
+            invalidateActiveTransform()
+            if workspaceMode == .diff {
+                diffResult = nil
+            }
+            updateCurrentPageForTextEditing()
+        }
+        .onChange(of: diffRightText) { _, _ in
+            invalidateActiveTransform()
+            diffResult = nil
+            updateCurrentPageForTextEditing()
+        }
+        .onChange(of: workspaceMode) { _, _ in
+            guard !isLoadingPageSnapshot else {
+                return
+            }
+            invalidateActiveTransform()
+            diffResult = nil
+            errorMessage = ""
             updateCurrentPageForTextEditing()
         }
         .onChange(of: outputText) { _, _ in
@@ -396,7 +417,7 @@ struct ContentView: View {
                     Text("JSON 格式化工具")
                         .font(.largeTitle.bold())
 
-                    Text("粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+T 新建页面；Cmd+S 保存到侧边栏；Cmd+F 或 Ctrl+F 搜索输出；系统入口支持 URL Scheme、JSON 文件打开和剪贴板自动格式化。")
+                    Text(workspaceMode.description)
                         .foregroundStyle(.secondary)
 
                     HStack(alignment: .center, spacing: 6) {
@@ -425,6 +446,14 @@ struct ContentView: View {
 
                 Spacer()
 
+                Picker("工作模式", selection: $workspaceMode) {
+                    ForEach(WorkspaceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 220)
+
                 Button(isDarkMode ? "日间模式" : "黑夜模式") {
                     toggleColorScheme()
                 }
@@ -434,45 +463,9 @@ struct ContentView: View {
                 clipboardImportBanner(clipboardText)
             }
 
-            HStack(spacing: 10) {
-                Button(isTransforming ? "处理中..." : "格式化") {
-                    formatJSON()
-                }
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isTransforming)
+            actionBar()
 
-                Button("压缩") {
-                    compactJSON()
-                }
-                .disabled(isTransforming)
-
-                Button("转义") {
-                    escapeJSON()
-                }
-                .disabled(isTransforming)
-
-                Button("转义并复制 JSON") {
-                    escapeAndCopyJSON()
-                }
-                .disabled(isTransforming)
-
-                Button("复制结果") {
-                    copyOutput()
-                }
-                .disabled(outputText.isEmpty || isTransforming)
-
-                Button("搜索输出") {
-                    openSearch()
-                }
-                .disabled(outputText.isEmpty || isTransforming)
-
-                Button("清空") {
-                    clearAll()
-                }
-                .disabled(inputText.isEmpty && outputText.isEmpty && errorMessage.isEmpty && searchQuery.isEmpty && queryExpression.isEmpty && !isTransforming)
-            }
-
-            if isSearchVisible {
+            if workspaceMode == .format, isSearchVisible {
                 outputSearchBar(matchCount: activeMatchCount)
             }
 
@@ -481,20 +474,34 @@ struct ContentView: View {
                     .controlSize(.small)
             }
 
-            if outputLineIndex.isVirtualized {
+            if workspaceMode == .format, outputLineIndex.isVirtualized {
                 Text("大文件模式：右侧输出按可视区域懒加载，已暂停高亮和全文搜索；复制结果仍会复制完整 JSON。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
 
-            HStack(alignment: .top, spacing: 12) {
-                editor(title: "输入", text: $inputText) {
-                    queryExpressionBar()
+            if workspaceMode == .format {
+                HStack(alignment: .top, spacing: 12) {
+                    editor(title: "输入", text: $inputText) {
+                        queryExpressionBar()
+                    }
+                    outputEditor(title: "输出")
                 }
-                outputEditor(title: "输出")
+                .frame(maxHeight: .infinity)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 12) {
+                        editor(title: "左侧 JSON", text: $inputText) { EmptyView() }
+                        editor(title: "右侧 JSON", text: $diffRightText) { EmptyView() }
+                    }
+                    .frame(maxHeight: .infinity)
+
+                    diffResultView()
+                        .frame(minHeight: 150, idealHeight: 190, maxHeight: 230)
+                }
+                .frame(maxHeight: .infinity)
             }
-            .frame(maxHeight: .infinity)
 
             if !errorMessage.isEmpty {
                 Text(errorMessage)
@@ -504,6 +511,101 @@ struct ContentView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func actionBar() -> some View {
+        HStack(spacing: 10) {
+            if workspaceMode == .format {
+                Button(isTransforming ? "处理中..." : "格式化") {
+                    formatJSON()
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(isTransforming)
+
+                Button("压缩") { compactJSON() }
+                    .disabled(isTransforming)
+                Button("转义") { escapeJSON() }
+                    .disabled(isTransforming)
+                Button("转义并复制 JSON") { escapeAndCopyJSON() }
+                    .disabled(isTransforming)
+                Button("复制结果") { copyOutput() }
+                    .disabled(outputText.isEmpty || isTransforming)
+                Button("搜索输出") { openSearch() }
+                    .disabled(outputText.isEmpty || isTransforming)
+            } else {
+                Button(isTransforming ? "比较中..." : "比较 JSON") {
+                    compareJSON()
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(isTransforming)
+            }
+
+            Button("清空") {
+                clearAll()
+            }
+            .disabled(
+                inputText.isEmpty && outputText.isEmpty && diffRightText.isEmpty
+                    && diffResult == nil && errorMessage.isEmpty && searchQuery.isEmpty
+                    && queryExpression.isEmpty && !isTransforming
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func diffResultView() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("比较结果")
+                .font(.headline)
+
+            if let diffResult {
+                if diffResult.isIdentical {
+                    Label("无差异：两个 JSON 的内容相同（对象键顺序已忽略）", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(diffResult.differences) { difference in
+                                differenceRow(difference)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            } else {
+                Text("输入左右两份 JSON 后点击“比较 JSON”，对象键顺序不同不会被视为差异，数组顺序仍参与比较。")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    private func differenceRow(_ difference: JSONDifference) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(difference.kind.title)
+                    .font(.caption.bold())
+                    .foregroundStyle(difference.kind.color)
+                Text(difference.path)
+                    .font(.system(.body, design: .monospaced).bold())
+                    .textSelection(.enabled)
+            }
+            if let oldValue = difference.oldValue {
+                Text("旧值：\(oldValue)")
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            if let newValue = difference.newValue {
+                Text("新值：\(newValue)")
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private func initializePageSelectionIfNeeded() {
@@ -666,6 +768,8 @@ struct ContentView: View {
         pages[pageIndex].snapshot = JSONWorkspacePageSnapshot(
             inputText: inputText,
             outputText: output.text,
+            workspaceMode: workspaceMode,
+            diffRightText: diffRightText,
             errorMessage: "",
             queryExpression: queryExpression,
             searchQuery: searchQuery,
@@ -693,6 +797,8 @@ struct ContentView: View {
         JSONWorkspacePageSnapshot(
             inputText: inputText,
             outputText: outputText,
+            workspaceMode: workspaceMode,
+            diffRightText: diffRightText,
             errorMessage: errorMessage,
             queryExpression: queryExpression,
             searchQuery: searchQuery,
@@ -724,6 +830,9 @@ struct ContentView: View {
         isTransforming = false
         inputText = page.snapshot.inputText
         outputText = page.snapshot.outputText
+        workspaceMode = page.snapshot.workspaceMode
+        diffRightText = page.snapshot.diffRightText
+        diffResult = nil
         errorMessage = page.snapshot.errorMessage
         queryExpression = page.snapshot.queryExpression
         searchQuery = page.snapshot.searchQuery
@@ -969,6 +1078,54 @@ struct ContentView: View {
         transformInput(actionName: "格式化", JSONFormatterService.format)
     }
 
+    private func compareJSON() {
+        let leftInput = inputText
+        let rightInput = diffRightText
+        guard !leftInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            invalidateActiveTransform()
+            diffResult = nil
+            errorMessage = "比较失败：左侧 JSON 不能为空"
+            return
+        }
+        guard !rightInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            invalidateActiveTransform()
+            diffResult = nil
+            errorMessage = "比较失败：右侧 JSON 不能为空"
+            return
+        }
+
+        let transformID = UUID()
+        activeTransformID = transformID
+        isTransforming = true
+        errorMessage = ""
+        diffResult = nil
+        logger.info("开始执行本地 JSON Diff，左侧输入长度 \(leftInput.count, privacy: .public)，右侧输入长度 \(rightInput.count, privacy: .public)")
+
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                try JSONFormatterService.diff(leftInput, rightInput)
+            }
+
+            await MainActor.run {
+                guard activeTransformID == transformID else {
+                    logger.info("忽略已过期的 JSON Diff 结果")
+                    return
+                }
+
+                isTransforming = false
+                activeTransformID = nil
+                switch result {
+                case .success(let result):
+                    diffResult = result
+                    logger.info("JSON Diff 成功，差异数量 \(result.differences.count, privacy: .public)")
+                case .failure(let error):
+                    errorMessage = "比较失败：\(error.localizedDescription)"
+                    logger.error("JSON Diff 失败，错误 \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
     private func runQueryExpression() {
         let expression = queryExpression.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1085,6 +1242,8 @@ struct ContentView: View {
     private func clearAll() {
         inputText = ""
         outputText = ""
+        diffRightText = ""
+        diffResult = nil
         errorMessage = ""
         searchQuery = ""
         queryExpression = ""
@@ -1102,6 +1261,14 @@ struct ContentView: View {
         outputScrollRevision += 1
         updateCurrentPageForTextEditing()
         logger.info("清空 JSON 输入输出内容成功")
+    }
+
+    private func invalidateActiveTransform() {
+        guard activeTransformID != nil || isTransforming else {
+            return
+        }
+        activeTransformID = nil
+        isTransforming = false
     }
 
     private func openSearch() {
@@ -1898,6 +2065,55 @@ private enum OutputDisplayMode: String, CaseIterable, Identifiable {
     }
 }
 
+private enum WorkspaceMode: String, CaseIterable, Identifiable {
+    case format
+    case diff
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .format:
+            return "格式化"
+        case .diff:
+            return "JSON Diff"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .format:
+            return "粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+T 新建页面；Cmd+S 保存到侧边栏；Cmd+F 或 Ctrl+F 搜索输出。"
+        case .diff:
+            return "左右输入两份 JSON 后按 Cmd+Enter 比较；对象键顺序会忽略，数组顺序仍参与比较，所有数据仅在本地处理。"
+        }
+    }
+}
+
+private extension JSONDifferenceKind {
+    var title: String {
+        switch self {
+        case .added:
+            return "新增"
+        case .removed:
+            return "删除"
+        case .changed:
+            return "变更"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .added:
+            return .green
+        case .removed:
+            return .red
+        case .changed:
+            return .orange
+        }
+    }
+}
+
 private struct JSONWorkspacePage: Identifiable, Equatable {
     static let initial = JSONWorkspacePage(title: "页面 1")
 
@@ -1957,6 +2173,8 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
             title: title,
             inputText: snapshot.inputText,
             outputText: snapshot.outputText,
+            workspaceMode: snapshot.workspaceMode.rawValue,
+            diffRightText: snapshot.diffRightText,
             errorMessage: snapshot.errorMessage,
             queryExpression: snapshot.queryExpression,
             searchQuery: snapshot.searchQuery,
@@ -2003,6 +2221,8 @@ private struct JSONWorkspacePage: Identifiable, Equatable {
             snapshot: JSONWorkspacePageSnapshot(
                 inputText: persistencePage.inputText,
                 outputText: persistencePage.outputText,
+                workspaceMode: WorkspaceMode(rawValue: persistencePage.workspaceMode ?? "") ?? .format,
+                diffRightText: persistencePage.diffRightText ?? "",
                 errorMessage: persistencePage.errorMessage,
                 queryExpression: persistencePage.queryExpression,
                 searchQuery: persistencePage.searchQuery,
@@ -2020,6 +2240,8 @@ private struct JSONWorkspacePageSnapshot: Equatable {
     static let empty = JSONWorkspacePageSnapshot(
         inputText: "",
         outputText: "",
+        workspaceMode: .format,
+        diffRightText: "",
         errorMessage: "",
         queryExpression: "",
         searchQuery: "",
@@ -2031,6 +2253,8 @@ private struct JSONWorkspacePageSnapshot: Equatable {
 
     var inputText: String
     var outputText: String
+    var workspaceMode: WorkspaceMode
+    var diffRightText: String
     var errorMessage: String
     var queryExpression: String
     var searchQuery: String

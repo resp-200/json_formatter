@@ -2,12 +2,13 @@
 
 English | [简体中文](README_CN.md)
 
-A local macOS SwiftUI app for formatting JSON. It supports formatting, compacting, escaping, tree browsing, search, JavaScript query expressions, and multiple external input flows.
+A local macOS SwiftUI app for formatting and comparing JSON. It supports formatting, compacting, escaping, semantic JSON Diff, tree browsing, search, JavaScript query expressions, and multiple external input flows.
 
 ## Features
 
 - Format JSON with `Cmd+Enter`; plain `Enter` stays as a newline in the editor.
 - Format, compact, escape, escape-and-copy JSON, copy result, and clear content.
+- Compare two editable JSON documents in JSON Diff mode. Object key order is ignored at every nesting level, while array order remains significant; added, removed, and changed values are reported with stable JSON paths.
 - Format escaped JSON strings into decoded object or array pretty JSON when applicable; non-JSON strings keep the normal JSON string behavior.
 - Smart quote normalization fallback for formatting, useful when JSON is copied from rich text sources.
 - Output display modes: text view and tree view.
@@ -32,7 +33,7 @@ Colorized JSON levels with keyword search:
 
 ## Shortcuts and Common Actions
 
-- `Cmd+Enter`: format the input JSON.
+- `Cmd+Enter`: format the input JSON, or compare both inputs in JSON Diff mode.
 - `Enter`: insert a newline in the input editor.
 - `Cmd+F` / `Ctrl+F`: search the output.
 - Search works with both text output and tree output.
