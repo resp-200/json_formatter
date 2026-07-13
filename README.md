@@ -52,6 +52,11 @@ $.items.length
 
 ## Changelog
 
+### JSON Formatter 1.2.0
+
+- Added semantic JSON Diff: object key order is ignored at every level, while array order remains significant, with added, removed, and changed values shown by stable JSON paths.
+- Fixed runaway bottom scrolling and white screens with long JSON input in format mode and in both the left and right JSON Diff editors.
+
 ### JSON Formatter 1.1.0
 
 #### 新增/优化
