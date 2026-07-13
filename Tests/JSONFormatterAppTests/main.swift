@@ -1,6 +1,22 @@
+import AppKit
 import Foundation
 import Testing
 @testable import JSONFormatterApp
+
+@Test @MainActor func editableJSONTextViewDoesNotTrackScrollViewportHeight() {
+    let textView = NSTextView()
+
+    JSONInputTextViewLayout.configure(textView)
+
+    #expect(textView.isHorizontallyResizable)
+    #expect(textView.isVerticallyResizable)
+    #expect(textView.autoresizingMask.contains(.width))
+    #expect(!textView.autoresizingMask.contains(.height))
+    #expect(textView.textContainer?.widthTracksTextView == false)
+    #expect(textView.textContainer?.heightTracksTextView == false)
+    #expect(textView.textContainer?.containerSize.width == CGFloat.greatestFiniteMagnitude)
+    #expect(textView.textContainer?.containerSize.height == CGFloat.greatestFiniteMagnitude)
+}
 
 @Test func jsonDiffIgnoresObjectKeyOrderAtEveryLevel() throws {
     let left = """

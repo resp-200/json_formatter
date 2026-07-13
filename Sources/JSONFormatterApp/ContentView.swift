@@ -1470,7 +1470,7 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
 
-        let textView = AutoPairingTextView()
+        let textView = AutoPairingTextView(frame: scrollView.contentView.bounds)
         textView.delegate = context.coordinator
         textView.autoPairingDelegate = context.coordinator
         textView.isEditable = true
@@ -1483,17 +1483,7 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         textView.disableSmartJSONInputSubstitutions()
         textView.applyPlainJSONInputStyle()
         textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isHorizontallyResizable = true
-        textView.isVerticallyResizable = true
-        textView.autoresizingMask = [.width, .height]
-        textView.textContainer?.containerSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        textView.textContainer?.widthTracksTextView = false
-        textView.textContainer?.lineFragmentPadding = 0
+        JSONInputTextViewLayout.configure(textView)
         textView.setPlainJSONInputString(text)
 
         scrollView.documentView = textView
@@ -1658,6 +1648,27 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
 
         let insertionLocation = min(max(preferredInsertionLocation, 0), textLength)
         return [NSValue(range: NSRange(location: insertionLocation, length: 0))]
+    }
+}
+
+@MainActor
+enum JSONInputTextViewLayout {
+    static func configure(_ textView: NSTextView) {
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+
+        // A vertically resizable NSTextView must not also track the clip view's height.
+        // Otherwise bottom overscroll can repeatedly enlarge the document view.
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
     }
 }
 
