@@ -29,7 +29,8 @@ Open JSON files quickly from Spotlight:
 
 Colorized JSON levels with keyword search:
 
-<img width="900" height="672" alt="Clipboard_Screenshot_1779088750" src="https://github.com/user-attachments/assets/068d9951-34c9-4af0-91b4-ea5fcb5a9642" />
+<img width="2278" height="1502" alt="Clipboard_Screenshot_1784113717" src="https://github.com/user-attachments/assets/b1e882a5-da64-4698-a5a4-aa14868de8fb" />
+
 
 ## Shortcuts and Common Actions
 
