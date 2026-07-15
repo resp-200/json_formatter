@@ -6,11 +6,19 @@ import SwiftUI
 struct JSONFormatterApp: App {
     @NSApplicationDelegateAdaptor(JSONFormatterAppDelegate.self) private var appDelegate
     @StateObject private var externalInputStore = ExternalJSONInputStore.shared
+    @AppStorage("jsonFormatterLanguage") private var languageRaw = AppLanguage.cn.rawValue
+
+    private var l10n: L10n {
+        L10n(language: AppLanguage(rawValue: languageRaw) ?? .cn)
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView(externalInputStore: externalInputStore)
-                .frame(minWidth: 900, minHeight: 640)
+                // 窗口最小宽度需自洽覆盖内部内容最小宽度，避免缩到最小时裁切：
+                // 侧边栏固定 260 + 主区内容最小宽度（顶栏折叠后约 470 主导，双编辑卡片 424）
+                // ≈ 730，取 820 留 ~90px 余量。宁可窗口最小值稍大也不裁切。
+                .frame(minWidth: 820, minHeight: 640)
                 .onOpenURL { url in
                     guard let text = JSONInputRouter.text(from: url) else {
                         return
@@ -20,22 +28,22 @@ struct JSONFormatterApp: App {
         }
         .commands {
             CommandGroup(after: .textEditing) {
-                Button("格式化 JSON") {
+                Button(l10n.t(.menuFormat)) {
                     NotificationCenter.default.post(name: .formatJSONRequested, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
 
-                Button("保存当前 JSON 页面") {
+                Button(l10n.t(.menuSavePage)) {
                     NotificationCenter.default.post(name: .saveJSONPageRequested, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: [.command])
 
-                Button("新建 JSON 页面") {
+                Button(l10n.t(.menuNewPage)) {
                     NotificationCenter.default.post(name: .newJSONPageRequested, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: [.command])
 
-                Button("搜索输出 JSON") {
+                Button(l10n.t(.menuFindOutput)) {
                     NotificationCenter.default.post(name: .findOutputRequested, object: nil)
                 }
                 .keyboardShortcut("f", modifiers: [.command])

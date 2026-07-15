@@ -4,7 +4,16 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var externalInputStore: ExternalJSONInputStore
-    @AppStorage("jsonFormatterIsDarkMode") private var isDarkMode = false
+    // 旧外观键：保留只读用于迁移，切换外观只写新键 jsonFormatterAppearanceMode（向后兼容）。
+    @AppStorage("jsonFormatterIsDarkMode") private var legacyIsDarkMode = false
+    @AppStorage("jsonFormatterAppearanceMode") private var appearanceModeRaw = ""
+    @AppStorage("jsonFormatterEditorFontSize") private var editorFontSize = 13.0
+    @AppStorage("jsonFormatterAutoSave") private var autoSave = false
+    @AppStorage("jsonFormatterLanguage") private var languageRaw = AppLanguage.cn.rawValue
+    @Environment(\.colorScheme) private var systemColorScheme
+    @State private var isClearHistoryConfirmationPresented = false
+    @State private var isSettingsPresented = false
+    @State private var autoSaveDebounceTask: Task<Void, Never>?
 
     @State private var inputText = ""
     @State private var outputText = ""
@@ -45,6 +54,53 @@ struct ContentView: View {
     private static let logger = Logger(subsystem: "local.json-formatter.app", category: "ContentView")
     private let logger = ContentView.logger
 
+    private var language: AppLanguage {
+        AppLanguage(rawValue: languageRaw) ?? .cn
+    }
+
+    private var l10n: L10n {
+        L10n(language: language)
+    }
+
+    /// 当前外观模式。老用户从未写过新键（空串）时回退用旧 `legacyIsDarkMode` 推导，
+    /// 保证升级不丢外观偏好；固化到新键在 onAppear 的 `migrateAppearanceModeIfNeeded()` 完成。
+    private var appearanceMode: AppearanceMode {
+        get {
+            if let mode = AppearanceMode(rawValue: appearanceModeRaw) {
+                return mode
+            }
+            return legacyIsDarkMode ? .dark : .light
+        }
+        nonmutating set {
+            appearanceModeRaw = newValue.rawValue
+        }
+    }
+
+    /// 有效暗色：喂给 NSTextView 高亮配色（buildHighlightedJSONText / depthColors）。
+    /// system 模式下读环境 colorScheme（此时 preferredColorScheme(nil)，环境即系统解析值）。
+    private var effectiveIsDarkMode: Bool {
+        switch appearanceMode {
+        case .light:
+            return false
+        case .dark:
+            return true
+        case .system:
+            return systemColorScheme == .dark
+        }
+    }
+
+    /// SwiftUI 强制外观：light→.light，dark→.dark，system→nil（跟随系统）。
+    private var preferredColorScheme: ColorScheme? {
+        switch appearanceMode {
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        case .system:
+            return nil
+        }
+    }
+
     private var safeCurrentMatchIndex: Int {
         guard !outputMatchRanges.isEmpty else {
             return 0
@@ -78,10 +134,6 @@ struct ContentView: View {
         selectedPageID ?? pages.first?.id ?? JSONWorkspacePage.initial.id
     }
 
-    private var canSaveCurrentPage: Bool {
-        selectedPage != nil
-    }
-
     private var safeActiveMatchIndex: Int {
         guard activeMatchCount > 0 else {
             return 0
@@ -96,28 +148,44 @@ struct ContentView: View {
             return version
         }
 
-        return "开发版"
+        return l10n.t(.devVersion)
     }
 
     private var appVersionText: String {
-        "版本 \(currentAppVersion)"
+        l10n.versionText(currentAppVersion)
     }
 
     var body: some View {
         HSplitView {
             sidebarView()
-                .frame(
-                    minWidth: isSidebarCollapsed ? 64 : 190,
-                    idealWidth: isSidebarCollapsed ? 72 : 220,
-                    maxWidth: isSidebarCollapsed ? 82 : 280
-                )
+                // 侧边栏使用固定宽度，避免 HSplitView 记忆分隔条位置导致
+                // 首次进入与「收起→再展开」后的宽度不一致；统一以设计稿 260 为基准。
+                .frame(width: isSidebarCollapsed ? 72 : 260)
 
             mainEditorView()
-                .frame(minWidth: 720, maxWidth: .infinity, maxHeight: .infinity)
+                // 主区最小宽度收窄，让窗口能真正压缩而不裁切；双编辑卡片各自的
+                // 最小宽度在 mainEditorView 分栏处单独约束，确保窄窗口下不被挤没。
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .preferredColorScheme(isDarkMode ? .dark : .light)
+        .background(AppTheme.surfaceBright)
+        .tint(AppTheme.primary)
+        .preferredColorScheme(preferredColorScheme)
+        .sheet(isPresented: $isSettingsPresented) {
+            SettingsModalView(
+                languageRaw: $languageRaw,
+                appearanceMode: Binding(get: { appearanceMode }, set: { appearanceMode = $0 }),
+                editorFontSize: $editorFontSize,
+                autoSave: $autoSave,
+                l10n: l10n,
+                onDone: { isSettingsPresented = false }
+            )
+        }
+        .onChange(of: autoSave) { _, isOn in
+            handleAutoSaveToggle(isOn)
+        }
         .onAppear {
+            migrateAppearanceModeIfNeeded()
             loadPersistedWorkspaceIfNeeded()
             installFindShortcutMonitor()
             checkLatestRelease()
@@ -192,40 +260,72 @@ struct ContentView: View {
                 expandedSidebarView()
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(AppTheme.surfaceContainerLow)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(AppTheme.outlineVariant)
+                .frame(width: 1)
+        }
     }
 
     private func expandedSidebarView() -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("JSON 页面")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(AppTheme.primary)
+                    .frame(width: 30, height: 30)
+                    .overlay {
+                        Image(systemName: "curlybraces")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                    }
+                    .shadow(color: AppTheme.primary.opacity(0.25), radius: 3, y: 1)
 
-                Spacer()
+                Text(l10n.t(.appTitle))
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(AppTheme.onSurface)
+
+                Spacer(minLength: 4)
 
                 Button {
                     toggleSidebarCollapsed()
                 } label: {
                     Image(systemName: "sidebar.leading")
+                        .foregroundStyle(AppTheme.onSurfaceVariant)
                 }
                 .buttonStyle(.borderless)
-                .help("收起侧边栏")
+                .help(l10n.t(.collapseSidebar))
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 18)
+            .padding(.bottom, 16)
 
-                Button {
-                    createNewPage()
-                } label: {
+            Button {
+                createNewPage()
+            } label: {
+                HStack(spacing: 8) {
                     Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(l10n.t(.newDocument))
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.borderless)
-                .help("新建 JSON 页面")
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(AppTheme.onSurface)
+                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(AppTheme.surfaceContainer)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(AppTheme.outlineVariant, lineWidth: 1)
+                )
             }
-
-            Button("保存当前页面") {
-                saveCurrentPage()
-            }
-            .disabled(!canSaveCurrentPage)
-
-            Divider()
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
@@ -234,10 +334,90 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 12)
+            }
+
+            sidebarFooter()
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func sidebarFooter() -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Divider()
+                .padding(.bottom, 6)
+
+            HStack(spacing: 6) {
+                Text(appVersionText)
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.onSurfaceVariant)
+                    .textSelection(.enabled)
+
+                if latestReleaseInfo != nil {
+                    Button {
+                        openLatestReleasePage()
+                    } label: {
+                        Text(l10n.t(.newBadge))
+                            .font(.caption2.bold())
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(AppTheme.error)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help(l10n.t(.newBadgeHelp))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 4)
+
+            // Settings 入口：点击弹出居中设置弹窗（语言 / 外观 / 字号 / 自动保存）。
+            // 原语言下拉菜单已迁移进弹窗的语言分区。
+            Button {
+                openSettings()
+            } label: {
+                sidebarFooterRow(icon: "gearshape", title: l10n.t(.settings), tint: AppTheme.onSurfaceVariant)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                isClearHistoryConfirmationPresented = true
+            } label: {
+                sidebarFooterRow(icon: "trash", title: l10n.t(.clearHistory), tint: AppTheme.error)
+            }
+            .buttonStyle(.plain)
+            .confirmationDialog(
+                l10n.t(.clearHistoryConfirmTitle),
+                isPresented: $isClearHistoryConfirmationPresented,
+                titleVisibility: .visible
+            ) {
+                Button(l10n.t(.clearHistoryConfirm), role: .destructive) {
+                    clearAllHistory()
+                }
+                Button(l10n.t(.cancel), role: .cancel) {}
+            } message: {
+                Text(l10n.t(.clearHistoryConfirmMessage))
             }
         }
-        .padding(12)
-        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 12)
+    }
+
+    private func sidebarFooterRow(icon: String, title: String, tint: Color) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .frame(width: 18)
+            Text(title)
+                .font(.system(size: 13))
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private func collapsedSidebarView() -> some View {
@@ -248,7 +428,7 @@ struct ContentView: View {
                 Image(systemName: "sidebar.leading")
             }
             .buttonStyle(.borderless)
-            .help("展开侧边栏")
+            .help(l10n.t(.expandSidebar))
 
             Button {
                 createNewPage()
@@ -256,7 +436,7 @@ struct ContentView: View {
                 Image(systemName: "plus")
             }
             .buttonStyle(.borderless)
-            .help("新建 JSON 页面")
+            .help(l10n.t(.newDocument))
 
             Divider()
 
@@ -278,89 +458,13 @@ struct ContentView: View {
         let isEditing = editingPageID == page.id
         let isActive = page.id == activePageID
 
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                if isEditing {
-                    TextField("页面名称", text: $editingPageTitle)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedEditingPageID, equals: page.id)
-                        .onSubmit {
-                            commitPageTitleEditing(page)
-                        }
-                } else {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(page.title)
-                                .font(.body.weight(isActive ? .semibold : .regular))
-                                .lineLimit(1)
-
-                            if page.isUnsaved {
-                                unsavedPageBadge()
-                            }
-
-                            Spacer(minLength: 4)
-
-                            if isActive {
-                                Text("当前")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-
-                        Text(page.subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .allowsHitTesting(false)
-                }
-            }
-
-            HStack(spacing: 8) {
-                if isEditing {
-                    Button("完成") {
-                        commitPageTitleEditing(page)
-                    }
-                    .buttonStyle(.borderless)
-
-                    Button("取消") {
-                        cancelPageTitleEditing(page)
-                    }
-                    .buttonStyle(.borderless)
-                } else {
-                    Button("重命名") {
-                        beginPageTitleEditing(page)
-                    }
-                    .buttonStyle(.borderless)
-
-                    Button("删除") {
-                        deletePage(page)
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            .font(.caption)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
+        return Group {
             if isEditing {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isActive ? Color.accentColor.opacity(0.16) : Color.clear)
+                pageEditingRow(page)
             } else {
-                Button {
-                    selectPage(page)
-                } label: {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(isActive ? Color.accentColor.opacity(0.16) : Color.clear)
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
+                pageCard(page, isActive: isActive)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
         .onChange(of: focusedEditingPageID) { previousPageID, nextPageID in
             guard previousPageID == page.id, nextPageID != page.id else {
                 return
@@ -376,6 +480,104 @@ struct ContentView: View {
         }
     }
 
+    private func pageCard(_ page: JSONWorkspacePage, isActive: Bool) -> some View {
+        Button {
+            selectPage(page)
+        } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isActive || page.isUnsaved ? AppTheme.primary.opacity(0.14) : AppTheme.surfaceContainer)
+                    .frame(width: 30, height: 30)
+                    .overlay {
+                        Image(systemName: page.isUnsaved ? "doc.text" : "doc")
+                            .font(.system(size: 14))
+                            .foregroundStyle(isActive || page.isUnsaved ? AppTheme.primary : AppTheme.outline)
+                    }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(page.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AppTheme.onSurface)
+                        .lineLimit(1)
+
+                    Text(pageStatusSubtitle(page))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(page.isUnsaved ? AppTheme.primary : AppTheme.outline)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if isActive {
+                    Text(l10n.t(.current))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(AppTheme.primary)
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive ? AppTheme.primary.opacity(0.08) : AppTheme.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isActive ? AppTheme.primary.opacity(0.5) : AppTheme.outlineVariant, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(l10n.t(.rename)) {
+                beginPageTitleEditing(page)
+            }
+            Button(l10n.t(.delete), role: .destructive) {
+                deletePage(page)
+            }
+        }
+    }
+
+    private func pageEditingRow(_ page: JSONWorkspacePage) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(l10n.t(.pageNamePlaceholder), text: $editingPageTitle)
+                .textFieldStyle(.roundedBorder)
+                .focused($focusedEditingPageID, equals: page.id)
+                .onSubmit {
+                    commitPageTitleEditing(page)
+                }
+
+            HStack(spacing: 8) {
+                Button(l10n.t(.done)) {
+                    commitPageTitleEditing(page)
+                }
+                .buttonStyle(.borderless)
+
+                Button(l10n.t(.cancel)) {
+                    cancelPageTitleEditing(page)
+                }
+                .buttonStyle(.borderless)
+            }
+            .font(.caption)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AppTheme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.primary.opacity(0.5), lineWidth: 1)
+        )
+    }
+
+    private func pageStatusSubtitle(_ page: JSONWorkspacePage) -> String {
+        if page.isUnsaved {
+            return l10n.t(.statusUnsaved)
+        }
+
+        return l10n.relativeTime(since: page.updatedAt)
+    }
+
     private func collapsedPageButton(_ page: JSONWorkspacePage) -> some View {
         Button {
             selectPage(page)
@@ -383,185 +585,358 @@ struct ContentView: View {
             ZStack(alignment: .topTrailing) {
                 Text(page.shortTitle)
                     .font(.caption.weight(page.id == activePageID ? .bold : .regular))
-                    .foregroundStyle(page.id == activePageID ? .white : .primary)
+                    .foregroundStyle(page.id == activePageID ? Color.white : AppTheme.onSurface)
                     .frame(width: 36, height: 32)
-                    .background(page.id == activePageID ? Color.accentColor : Color(nsColor: .textBackgroundColor))
+                    .background(page.id == activePageID ? AppTheme.primary : AppTheme.surface)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(AppTheme.outlineVariant, lineWidth: page.id == activePageID ? 0 : 1)
+                    )
 
                 if page.isUnsaved {
                     Circle()
-                        .fill(Color.orange)
+                        .fill(AppTheme.primary)
                         .frame(width: 8, height: 8)
                         .offset(x: 3, y: -3)
                 }
             }
         }
         .buttonStyle(.plain)
-        .help(page.isUnsaved ? "\(page.title)（未保存）" : page.title)
-    }
-
-    private func unsavedPageBadge() -> some View {
-        Text("未保存")
-            .font(.caption2)
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(Color.orange.opacity(0.12))
-            .clipShape(Capsule())
+        .help(page.isUnsaved ? "\(page.title) (\(l10n.t(.statusUnsaved)))" : page.title)
     }
 
     private func mainEditorView() -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("JSON 格式化工具")
-                        .font(.largeTitle.bold())
+        VStack(alignment: .leading, spacing: 0) {
+            topBar()
 
-                    Text(workspaceMode.description)
-                        .foregroundStyle(.secondary)
-
-                    HStack(alignment: .center, spacing: 6) {
-                        Text(appVersionText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-
-                        if latestReleaseInfo != nil {
-                            Button {
-                                openLatestReleasePage()
-                            } label: {
-                                Text("new")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.red)
-                                    .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .help("发现新版本，点击前往 GitHub Releases 下载")
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                if let clipboardText = externalInputStore.clipboardTextToOffer {
+                    clipboardImportBanner(clipboardText)
                 }
 
-                Spacer()
-
-                Picker("工作模式", selection: $workspaceMode) {
-                    ForEach(WorkspaceMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 220)
-
-                Button(isDarkMode ? "日间模式" : "黑夜模式") {
-                    toggleColorScheme()
-                }
-            }
-
-            if let clipboardText = externalInputStore.clipboardTextToOffer {
-                clipboardImportBanner(clipboardText)
-            }
-
-            actionBar()
-
-            if workspaceMode == .format, isSearchVisible {
-                outputSearchBar(matchCount: activeMatchCount)
-            }
-
-            if isTransforming {
-                ProgressView("正在本地处理 JSON...")
-                    .controlSize(.small)
-            }
-
-            if workspaceMode == .format, outputLineIndex.isVirtualized {
-                Text("大文件模式：右侧输出按可视区域懒加载，已暂停高亮和全文搜索；复制结果仍会复制完整 JSON。")
+                Text(workspaceMode.description(l10n))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppTheme.onSurfaceVariant)
                     .textSelection(.enabled)
-            }
 
-            if workspaceMode == .format {
-                HStack(alignment: .top, spacing: 12) {
-                    editor(title: "输入", text: $inputText) {
-                        queryExpressionBar()
-                    }
-                    outputEditor(title: "输出")
+                if isTransforming {
+                    ProgressView(l10n.t(.processing))
+                        .controlSize(.small)
                 }
-                .frame(maxHeight: .infinity)
-            } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 12) {
-                        editor(title: "左侧 JSON", text: $inputText) { EmptyView() }
-                        editor(title: "右侧 JSON", text: $diffRightText) { EmptyView() }
+
+                if workspaceMode == .format, outputLineIndex.isVirtualized {
+                    Text(l10n.t(.largeFileBanner))
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.onSurfaceVariant)
+                        .textSelection(.enabled)
+                }
+
+                if workspaceMode == .format {
+                    HStack(alignment: .top, spacing: 16) {
+                        editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) {
+                            queryExpressionBar()
+                        }
+                        .frame(minWidth: 180)
+                        outputEditor(title: l10n.t(.outputTitle))
+                            .frame(minWidth: 180)
                     }
                     .frame(maxHeight: .infinity)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 16) {
+                            editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) { EmptyView() }
+                                .frame(minWidth: 180)
+                            editor(title: l10n.t(.outputTitle), text: $diffRightText, showLineNumbers: false) { EmptyView() }
+                                .frame(minWidth: 180)
+                        }
+                        .frame(maxHeight: .infinity)
 
-                    diffResultView()
-                        .frame(minHeight: 150, idealHeight: 190, maxHeight: 230)
+                        diffResultView()
+                            .frame(minHeight: 150, idealHeight: 190, maxHeight: 230)
+                    }
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(maxHeight: .infinity)
-            }
 
-            if !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
+                if !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .foregroundStyle(AppTheme.error)
+                        .textSelection(.enabled)
+                }
             }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.surfaceBright)
     }
 
-    @ViewBuilder
-    private func actionBar() -> some View {
-        HStack(spacing: 10) {
-            if workspaceMode == .format {
-                Button(isTransforming ? "处理中..." : "格式化") {
-                    formatJSON()
-                }
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isTransforming)
+    private func topBar() -> some View {
+        HStack(spacing: 12) {
+            // 按钮组做「溢出折叠」：宽时全部平铺，窄时放不下的次要按钮
+            // 自动收进右侧「更多」下拉菜单，主按钮始终在外。
+            adaptiveActionBar()
 
-                Button("压缩") { compactJSON() }
-                    .disabled(isTransforming)
-                Button("转义") { escapeJSON() }
-                    .disabled(isTransforming)
-                Button("转义并复制 JSON") { escapeAndCopyJSON() }
-                    .disabled(isTransforming)
-                Button("复制结果") { copyOutput() }
-                    .disabled(outputText.isEmpty || isTransforming)
-                Button("搜索输出") { openSearch() }
-                    .disabled(outputText.isEmpty || isTransforming)
-            } else {
-                Button(isTransforming ? "比较中..." : "比较 JSON") {
-                    compareJSON()
-                }
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isTransforming)
+            Spacer(minLength: 12)
+
+            if workspaceMode == .format {
+                topBarSearchField()
             }
 
-            Button("清空") {
+            // 顶栏放日夜切换（原为语言切换，已与侧边栏 Settings 对调）。
+            themeToggle()
+
+            // 「清空」固定在顶栏最右（原保存按钮位置），不参与左侧按钮组的折叠。
+            Button(l10n.t(.clear)) {
                 clearAll()
             }
-            .disabled(
-                inputText.isEmpty && outputText.isEmpty && diffRightText.isEmpty
-                    && diffResult == nil && errorMessage.isEmpty && searchQuery.isEmpty
-                    && queryExpression.isEmpty && !isTransforming
-            )
+            .buttonStyle(SecondaryActionButtonStyle())
+            .disabled(isClearDisabled)
+            .layoutPriority(1)
         }
+        .padding(.horizontal, 24)
+        .frame(height: 60)
+        .frame(maxWidth: .infinity)
+        .background(AppTheme.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(AppTheme.outlineVariant)
+                .frame(height: 1)
+        }
+    }
+
+    private func topBarSearchField() -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(AppTheme.outline)
+
+            TextField(l10n.t(.searchPlaceholder), text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundStyle(AppTheme.onSurface)
+                .focused($isSearchFocused)
+                .frame(minWidth: 110, idealWidth: 180, maxWidth: 180)
+                .onSubmit {
+                    isSearchVisible = true
+                    selectNextMatch(matchCount: activeMatchCount)
+                }
+
+            if !searchQuery.isEmpty {
+                Text(l10n.searchStatus(
+                    currentIndex: safeActiveMatchIndex,
+                    matchCount: activeMatchCount,
+                    hasQuery: !searchQuery.isEmpty,
+                    isPaused: isOutputSearchSkippedForSize
+                ))
+                .font(.caption2)
+                .foregroundStyle(AppTheme.onSurfaceVariant)
+
+                Button {
+                    selectPreviousMatch(matchCount: activeMatchCount)
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(activeMatchCount == 0 || isOutputSearchSkippedForSize)
+
+                Button {
+                    selectNextMatch(matchCount: activeMatchCount)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(activeMatchCount == 0 || isOutputSearchSkippedForSize)
+
+                Button {
+                    closeSearch()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppTheme.outline)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AppTheme.surfaceContainerLow)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.outlineVariant, lineWidth: 1)
+        )
+        .onChange(of: searchQuery) { _, newValue in
+            if !newValue.isEmpty {
+                isSearchVisible = true
+            }
+        }
+    }
+
+    /// 顶栏日夜快切：太阳 / 月亮图标按钮。语义为在 light↔dark 间显式切换
+    /// （依据当前有效外观决定去向），System 只能从设置弹窗进入。
+    private func themeToggle() -> some View {
+        Button {
+            toggleColorScheme()
+        } label: {
+            Image(systemName: effectiveIsDarkMode ? "sun.max.fill" : "moon.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(AppTheme.onSurfaceVariant)
+                .frame(width: 30, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(AppTheme.surfaceContainerLow)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(AppTheme.outlineVariant, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(effectiveIsDarkMode ? l10n.t(.toggleLightMode) : l10n.t(.toggleDarkMode))
+    }
+
+    /// 顶栏左侧操作按钮的描述数据，用于在平铺 / 折叠两种布局间复用同一份逻辑。
+    private struct ActionButtonSpec: Identifiable {
+        let id: String
+        let title: String
+        let isDisabled: Bool
+        let action: () -> Void
+    }
+
+    /// 当前是否禁用「清空」：所有内容与状态均为空且非处理中。
+    private var isClearDisabled: Bool {
+        inputText.isEmpty && outputText.isEmpty && diffRightText.isEmpty
+            && diffResult == nil && errorMessage.isEmpty && searchQuery.isEmpty
+            && queryExpression.isEmpty && !isTransforming
+    }
+
+    /// 可折叠的次要按钮（描边），顺序即优先级：靠后的先被收进「更多」菜单。
+    /// 注意：「清空」不在此列——它固定在顶栏最右，不参与折叠。
+    private var collapsibleActionSpecs: [ActionButtonSpec] {
+        if workspaceMode == .format {
+            return [
+                ActionButtonSpec(id: "compress", title: l10n.t(.compress), isDisabled: isTransforming) {
+                    compactJSON()
+                },
+                ActionButtonSpec(id: "diff", title: l10n.t(.jsonDiff), isDisabled: isTransforming) {
+                    switchWorkspaceMode(to: .diff)
+                },
+                ActionButtonSpec(id: "escape", title: l10n.t(.escape), isDisabled: isTransforming) {
+                    escapeJSON()
+                },
+            ]
+        }
+        return [
+            ActionButtonSpec(id: "toFormat", title: l10n.t(.format), isDisabled: isTransforming) {
+                switchWorkspaceMode(to: .format)
+            },
+        ]
+    }
+
+    /// 仅存在于「更多」菜单里的动作（转义并复制 / 复制结果），沿用原 ellipsis 菜单。
+    private var overflowOnlyActionSpecs: [ActionButtonSpec] {
+        guard workspaceMode == .format else {
+            return []
+        }
+        return [
+            ActionButtonSpec(id: "escapeAndCopy", title: l10n.t(.escapeAndCopy), isDisabled: isTransforming) {
+                escapeAndCopyJSON()
+            },
+            ActionButtonSpec(id: "copyOutput", title: l10n.t(.copyOutput), isDisabled: outputText.isEmpty || isTransforming) {
+                copyOutput()
+            },
+        ]
+    }
+
+    /// 顶栏主按钮（格式化 / 比较）：始终保留在外，带 Cmd+Enter 快捷键。
+    @ViewBuilder
+    private func primaryActionButton() -> some View {
+        if workspaceMode == .format {
+            Button(isTransforming ? l10n.t(.formatting) : l10n.t(.format)) {
+                formatJSON()
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .keyboardShortcut(.return, modifiers: [.command])
+            .disabled(isTransforming)
+        } else {
+            Button(isTransforming ? l10n.t(.comparing) : l10n.t(.compare)) {
+                compareJSON()
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .keyboardShortcut(.return, modifiers: [.command])
+            .disabled(isTransforming)
+        }
+    }
+
+    /// 溢出折叠的操作按钮组：用 ViewThatFits 从「全部平铺」到「逐步折叠进菜单」
+    /// 挑选第一个能放下的候选布局，去掉了原横向 ScrollView 包裹，避免闪烁。
+    @ViewBuilder
+    private func adaptiveActionBar() -> some View {
+        let collapsible = collapsibleActionSpecs
+        // 显式枚举候选，避免 ViewThatFits 把 ForEach 当作单一候选。
+        // 可折叠按钮当前最多 3 个（格式化模式：压缩 / Diff / 转义），从全平铺逐级折叠；
+        // visibleCount 大于实际数量时 prefix 自动截断，与低位候选等价，
+        // ViewThatFits 取首个能放下者，无副作用（保留 4 位候选为将来扩展留余量）。
+        ViewThatFits(in: .horizontal) {
+            actionBarCandidate(visibleCount: 4, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 3, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 2, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 1, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 0, collapsible: collapsible)
+        }
+    }
+
+    /// 单个候选布局：前 `visibleCount` 个次要按钮平铺，其余与「仅菜单项」合并进「更多」菜单。
+    private func actionBarCandidate(visibleCount: Int, collapsible: [ActionButtonSpec]) -> some View {
+        let visible = Array(collapsible.prefix(visibleCount))
+        let overflow = Array(collapsible.dropFirst(visibleCount)) + overflowOnlyActionSpecs
+        return HStack(spacing: 8) {
+            primaryActionButton()
+
+            ForEach(visible) { spec in
+                Button(spec.title) { spec.action() }
+                    .buttonStyle(OutlineActionButtonStyle())
+                    .disabled(spec.isDisabled)
+            }
+
+            if !overflow.isEmpty {
+                overflowActionMenu(overflow)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// 「更多」下拉菜单，收纳折叠掉的按钮与仅菜单项。
+    private func overflowActionMenu(_ specs: [ActionButtonSpec]) -> some View {
+        Menu {
+            ForEach(specs) { spec in
+                Button(spec.title) { spec.action() }
+                    .disabled(spec.isDisabled)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 30)
+        .help(l10n.t(.more))
     }
 
     @ViewBuilder
     private func diffResultView() -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("比较结果")
+            Text(l10n.t(.diffResultTitle))
                 .font(.headline)
+                .foregroundStyle(AppTheme.onSurface)
 
             if let diffResult {
                 if diffResult.isIdentical {
-                    Label("无差异：两个 JSON 的内容相同（对象键顺序已忽略）", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                    Label(l10n.t(.diffIdentical), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(AppTheme.stringValue)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 } else {
                     ScrollView {
@@ -574,20 +949,21 @@ struct ContentView: View {
                     }
                 }
             } else {
-                Text("输入左右两份 JSON 后点击“比较 JSON”，对象键顺序不同不会被视为差异，数组顺序仍参与比较。")
-                    .foregroundStyle(.secondary)
+                Text(l10n.t(.diffEmptyHint))
+                    .foregroundStyle(AppTheme.onSurfaceVariant)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
-        .padding(10)
-        .background(Color(nsColor: .textBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        .padding(12)
+        .background(AppTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.outlineVariant, lineWidth: 1))
     }
 
     private func differenceRow(_ difference: JSONDifference) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(difference.kind.title)
+                Text(l10n.diffKindTitle(difference.kind))
                     .font(.caption.bold())
                     .foregroundStyle(difference.kind.color)
                 Text(difference.path)
@@ -595,12 +971,12 @@ struct ContentView: View {
                     .textSelection(.enabled)
             }
             if let oldValue = difference.oldValue {
-                Text("旧值：\(oldValue)")
+                Text(language == .cn ? "旧值：\(oldValue)" : "Old: \(oldValue)")
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
             }
             if let newValue = difference.newValue {
-                Text("新值：\(newValue)")
+                Text(language == .cn ? "新值：\(newValue)" : "New: \(newValue)")
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
             }
@@ -621,7 +997,7 @@ struct ContentView: View {
 
     private func createNewPage() {
         updateCurrentPageForUnsavedChanges()
-        let currentTitle = "页面 \(nextPageNumber)"
+        let currentTitle = l10n.newPageTitle(nextPageNumber)
         let page = JSONWorkspacePage(title: currentTitle)
         nextPageNumber += 1
         pages.insert(page, at: 0)
@@ -636,7 +1012,7 @@ struct ContentView: View {
 
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
             let savedAt = Date()
-            var page = JSONWorkspacePage(title: "页面 \(nextPageNumber)", snapshot: snapshot, updatedAt: savedAt)
+            var page = JSONWorkspacePage(title: l10n.newPageTitle(nextPageNumber), snapshot: snapshot, updatedAt: savedAt)
             page.markSaved(at: savedAt)
             nextPageNumber += 1
             pages.insert(page, at: 0)
@@ -660,6 +1036,9 @@ struct ContentView: View {
         }
 
         updateCurrentPageForUnsavedChanges()
+        if autoSave {
+            scheduleAutoSave()
+        }
     }
 
     private func updateCurrentPageForUnsavedChanges() {
@@ -744,7 +1123,7 @@ struct ContentView: View {
         }
 
         if pages.isEmpty {
-            let replacementPage = JSONWorkspacePage(title: "页面 1")
+            let replacementPage = JSONWorkspacePage(title: l10n.newPageTitle(1))
             pages = [replacementPage]
             nextPageNumber = max(nextPageNumber, 2)
             loadPage(replacementPage)
@@ -757,6 +1136,87 @@ struct ContentView: View {
 
         persistWorkspaceNow(reason: "删除 JSON 页面后保存工作区")
         logger.info("删除 JSON 页面成功，页面标识 \(page.id.uuidString, privacy: .public)，剩余页面数 \(pages.count, privacy: .public)")
+    }
+
+    private func clearAllHistory() {
+        let removedPageCount = pages.count
+        editingPageID = nil
+        clearPageTitleEditingState()
+        let replacementPage = JSONWorkspacePage(title: l10n.newPageTitle(1))
+        pages = [replacementPage]
+        nextPageNumber = 2
+        loadPage(replacementPage)
+        persistWorkspaceNow(reason: "用户从侧边栏清空全部 JSON 文档历史")
+        logger.info("清空全部 JSON 文档历史成功，已删除页面数 \(removedPageCount, privacy: .public)，重置为单个空白页面")
+    }
+
+    private func switchWorkspaceMode(to mode: WorkspaceMode) {
+        guard workspaceMode != mode else {
+            return
+        }
+        workspaceMode = mode
+        logger.info("切换 JSON 工作模式，当前为 \(mode.rawValue, privacy: .public)")
+    }
+
+    /// 首次运行迁移：老用户从未写过新外观键（空串）时，用旧 `legacyIsDarkMode`
+    /// 推导并固化到新键，避免升级丢外观偏好。旧键保留不动（向后兼容 / 可回滚）。
+    private func migrateAppearanceModeIfNeeded() {
+        guard appearanceModeRaw.isEmpty else {
+            return
+        }
+        let migrated: AppearanceMode = legacyIsDarkMode ? .dark : .light
+        appearanceModeRaw = migrated.rawValue
+        logger.info("迁移外观偏好到新键，旧暗色开关 \(legacyIsDarkMode, privacy: .public)，迁移后外观 \(migrated.rawValue, privacy: .public)")
+    }
+
+    private func openSettings() {
+        isSettingsPresented = true
+        logger.info("打开设置弹窗，当前语言 \(languageRaw, privacy: .public)，当前外观 \(appearanceMode.rawValue, privacy: .public)，当前字号 \(editorFontSize, privacy: .public)，自动保存 \(autoSave, privacy: .public)")
+    }
+
+    /// 自动保存开关变化：开启的瞬间对当前页触发一次保存（不批量处理历史页），
+    /// 关闭则取消待执行的防抖任务，回到手动保存行为。
+    private func handleAutoSaveToggle(_ isOn: Bool) {
+        logger.info("切换自动保存开关，当前为 \(isOn ? "开启" : "关闭", privacy: .public)")
+        if isOn {
+            commitAutoSave()
+        } else {
+            autoSaveDebounceTask?.cancel()
+            autoSaveDebounceTask = nil
+        }
+    }
+
+    /// 防抖调度自动保存：编辑内容后 600ms 无新编辑则落盘，避免连续输入频繁写盘。
+    private func scheduleAutoSave() {
+        autoSaveDebounceTask?.cancel()
+        autoSaveDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await MainActor.run {
+                commitAutoSave()
+            }
+        }
+    }
+
+    /// 提交一次自动保存：将当前页标记为已保存并立即持久化。
+    private func commitAutoSave() {
+        guard didLoadPersistedWorkspace else {
+            return
+        }
+        initializePageSelectionIfNeeded()
+        let pageID = activePageID
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return
+        }
+
+        let savedAt = Date()
+        pages[pageIndex].snapshot = currentPageSnapshot()
+        pages[pageIndex].updatedAt = savedAt
+        pages[pageIndex].markSaved(at: savedAt)
+        persistWorkspaceNow(reason: "自动保存当前 JSON 页面")
+        logger.info("自动保存当前 JSON 页面成功，页面标识 \(pageID.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
     }
 
     private func updateCurrentPageAfterTransform(with output: OutputTransformResult) {
@@ -922,160 +1382,266 @@ struct ContentView: View {
 
     private func clipboardImportBanner(_ clipboardText: String) -> some View {
         HStack(spacing: 10) {
-            Text("检测到剪贴板文本，可作为 JSON 输入。")
-                .foregroundStyle(.secondary)
+            Text(l10n.t(.clipboardBanner))
+                .foregroundStyle(AppTheme.onSurfaceVariant)
 
             Spacer()
 
-            Button("格式化剪贴板") {
+            Button(l10n.t(.formatClipboard)) {
                 inputText = clipboardText
                 externalInputStore.clearClipboardOffer()
                 formatJSON()
             }
+            .buttonStyle(OutlineActionButtonStyle())
 
-            Button("忽略") {
+            Button(l10n.t(.ignore)) {
                 externalInputStore.clearClipboardOffer()
             }
+            .buttonStyle(OutlineActionButtonStyle())
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(12)
+        .background(AppTheme.surfaceContainer)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func editor<Footer: View>(title: String, text: Binding<String>, @ViewBuilder footer: () -> Footer) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.headline)
-            AutoPairingTextEditor(text: text)
-                .background(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
+    /// 输入卡片：标题栏「INPUT」+ Paste + 内容 + 底部 footer（JS 查询迷你控制台）。
+    private func editor<Footer: View>(
+        title: String,
+        text: Binding<String>,
+        showLineNumbers: Bool,
+        @ViewBuilder footer: () -> Footer
+    ) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .kerning(0.5)
+                    .foregroundStyle(AppTheme.onSurfaceVariant)
+
+                Spacer()
+
+                Button(l10n.t(.paste)) {
+                    pasteIntoInput(text)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AppTheme.primary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .background(AppTheme.surfaceContainerLow)
+
+            Divider()
+
+            AutoPairingTextEditor(text: text, fontSize: CGFloat(editorFontSize))
+                .background(AppTheme.surface)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             footer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(AppTheme.outlineVariant, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.03), radius: 4, y: 2)
     }
 
+    private func pasteIntoInput(_ text: Binding<String>) {
+        guard let clipboard = NSPasteboard.general.string(forType: .string), !clipboard.isEmpty else {
+            logger.info("粘贴到输入区跳过，剪贴板无可用文本")
+            return
+        }
+        text.wrappedValue = clipboard
+        logger.info("从剪贴板粘贴到输入区成功，文本长度 \(clipboard.count, privacy: .public)")
+    }
+
+    /// JS 查询迷你控制台，固定在输入卡片底部。
     private func queryExpressionBar() -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            Divider()
+
             HStack(spacing: 8) {
-                TextField("JS 查询/处理表达式，例如 .hi.map(x => x) 或 .filter(x => x > 1)", text: $queryExpression)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                Text("JS")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(AppTheme.outline)
+
+                TextField(l10n.t(.queryPlaceholder), text: $queryExpression)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(AppTheme.onSurface)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(AppTheme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(AppTheme.outlineVariant, lineWidth: 1)
+                    )
                     .onSubmit {
                         runQueryExpression()
                     }
                     .disabled(isTransforming)
 
-                Button("执行") {
+                Button(l10n.t(.run)) {
                     runQueryExpression()
                 }
+                .buttonStyle(OutlineActionButtonStyle())
                 .disabled(inputText.isEmpty || queryExpression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTransforming)
             }
-
-            Text("表达式基于输入 JSON 执行：以 . 或 [ 开头会自动接在根数据后，也可用 value、input 或 $ 引用根数据。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
+        .background(AppTheme.surfaceContainerLow)
+        .help(l10n.t(.queryHint))
     }
 
+    /// 输出卡片：标题栏「OUTPUT」+ Text/Tree 切换 + 行号栏 + 内容。
     private func outputEditor(title: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.headline)
+                    .font(.system(size: 11, weight: .semibold))
+                    .kerning(0.5)
+                    .foregroundStyle(AppTheme.onSurfaceVariant)
 
                 Spacer()
 
-                Picker("输出视图", selection: $outputDisplayMode) {
-                    ForEach(OutputDisplayMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 130)
-                .disabled(outputText.isEmpty || isTransforming)
-
                 if outputDisplayMode == .tree {
-                    Button("一键展开") {
+                    Button(l10n.t(.expandAll)) {
                         expandEntireTree()
                     }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.primary)
                     .disabled(jsonTreeRoot == nil)
 
-                    Button("一键收起") {
+                    Button(l10n.t(.collapseAll)) {
                         collapseEntireTree()
                     }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.primary)
                     .disabled(jsonTreeRoot == nil)
                 }
-            }
 
-            Group {
-                switch outputDisplayMode {
-                case .text:
-                    HighlightedOutputView(
-                        outputText: outputText,
-                        lineIndex: outputLineIndex,
-                        isDarkMode: isDarkMode,
-                        matchRanges: outputMatchRanges,
-                        currentMatchIndex: safeCurrentMatchIndex,
-                        currentMatchRange: currentMatchRange,
-                        renderRevision: outputRenderRevision,
-                        scrollRevision: outputScrollRevision
-                    )
-                case .tree:
-                    JSONTreeView(
-                        root: jsonTreeRoot,
-                        expandedNodeIDs: $expandedTreeNodeIDs,
-                        searchMatches: treeSearchMatches,
-                        currentMatchIndex: safeActiveMatchIndex
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
+                outputModeSwitcher()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .textBackgroundColor))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-            )
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .background(AppTheme.surfaceContainerLow)
+
+            Divider()
+
+            HStack(spacing: 0) {
+                if outputDisplayMode == .text {
+                    outputLineNumberGutter()
+                    Divider()
+                }
+
+                Group {
+                    switch outputDisplayMode {
+                    case .text:
+                        HighlightedOutputView(
+                            outputText: outputText,
+                            lineIndex: outputLineIndex,
+                            isDarkMode: effectiveIsDarkMode,
+                            matchRanges: outputMatchRanges,
+                            currentMatchIndex: safeCurrentMatchIndex,
+                            currentMatchRange: currentMatchRange,
+                            renderRevision: outputRenderRevision,
+                            scrollRevision: outputScrollRevision,
+                            language: language,
+                            fontSize: CGFloat(editorFontSize)
+                        )
+                    case .tree:
+                        JSONTreeView(
+                            root: jsonTreeRoot,
+                            expandedNodeIDs: $expandedTreeNodeIDs,
+                            searchMatches: treeSearchMatches,
+                            currentMatchIndex: safeActiveMatchIndex,
+                            language: language
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(AppTheme.surface)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(AppTheme.outlineVariant, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.03), radius: 4, y: 2)
     }
 
-    private func outputSearchBar(matchCount: Int) -> some View {
-        HStack(spacing: 8) {
-            TextField("搜索输出 JSON", text: $searchQuery)
-                .textFieldStyle(.roundedBorder)
-                .focused($isSearchFocused)
-                .onSubmit {
-                    selectNextMatch(matchCount: matchCount)
+    /// 输出文本视图的行号栏（MVP：按行数生成，与内容行数对齐，随内容纵向滚动同步交由二期）。
+    private func outputLineNumberGutter() -> some View {
+        let lineCount = max(min(outputLineIndex.lineCount, 5_000), 1)
+        return ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .trailing, spacing: 0) {
+                ForEach(1...lineCount, id: \.self) { line in
+                    Text("\(line)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(AppTheme.outline.opacity(0.6))
+                        .frame(height: 18, alignment: .trailing)
                 }
-                .frame(width: 260)
-
-            Text(searchStatusText(matchCount: matchCount))
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 90, alignment: .leading)
-
-            Button("上一个") {
-                selectPreviousMatch(matchCount: matchCount)
             }
-            .disabled(matchCount == 0 || isOutputSearchSkippedForSize)
+            .padding(.top, 10)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .frame(width: 44)
+        .background(AppTheme.surfaceContainerLow.opacity(0.4))
+        .disabled(true)
+    }
 
-            Button("下一个") {
-                selectNextMatch(matchCount: matchCount)
-            }
-            .disabled(matchCount == 0 || isOutputSearchSkippedForSize)
-
-            Button("关闭") {
-                closeSearch()
+    private func outputModeSwitcher() -> some View {
+        HStack(spacing: 2) {
+            ForEach(OutputDisplayMode.allCases) { mode in
+                let isSelected = mode == outputDisplayMode
+                Button {
+                    guard !(outputText.isEmpty || isTransforming) else {
+                        return
+                    }
+                    outputDisplayMode = mode
+                } label: {
+                    Text(mode.title(l10n))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(isSelected ? AppTheme.onSurface : AppTheme.onSurfaceVariant)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(isSelected ? AppTheme.surface : Color.clear)
+                        )
+                        .shadow(color: isSelected ? Color.black.opacity(0.08) : Color.clear, radius: 1, y: 1)
+                }
+                .buttonStyle(.plain)
             }
         }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AppTheme.surfaceContainer)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.outlineVariant, lineWidth: 1)
+        )
+        .disabled(outputText.isEmpty || isTransforming)
     }
 
     private func formatJSON() {
-        transformInput(actionName: "格式化", JSONFormatterService.format)
+        transformInput(actionKey: .actionFormat, JSONFormatterService.format)
     }
 
     private func compareJSON() {
@@ -1084,13 +1650,13 @@ struct ContentView: View {
         guard !leftInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             invalidateActiveTransform()
             diffResult = nil
-            errorMessage = "比较失败：左侧 JSON 不能为空"
+            errorMessage = l10n.t(.diffLeftEmpty)
             return
         }
         guard !rightInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             invalidateActiveTransform()
             diffResult = nil
-            errorMessage = "比较失败：右侧 JSON 不能为空"
+            errorMessage = l10n.t(.diffRightEmpty)
             return
         }
 
@@ -1119,7 +1685,7 @@ struct ContentView: View {
                     diffResult = result
                     logger.info("JSON Diff 成功，差异数量 \(result.differences.count, privacy: .public)")
                 case .failure(let error):
-                    errorMessage = "比较失败：\(error.localizedDescription)"
+                    errorMessage = l10n.failure(.actionCompare, detail: error.localizedDescription)
                     logger.error("JSON Diff 失败，错误 \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -1129,39 +1695,40 @@ struct ContentView: View {
     private func runQueryExpression() {
         let expression = queryExpression.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "JS 查询失败：请输入 JSON 后再执行表达式"
+            errorMessage = l10n.t(.queryNeedInput)
             logger.info("跳过 JS 查询，输入为空")
             return
         }
         guard !expression.isEmpty else {
-            errorMessage = "JS 查询失败：JS 表达式不能为空"
+            errorMessage = l10n.t(.queryNeedExpression)
             logger.info("跳过 JS 查询，表达式为空")
             return
         }
 
-        transformInput(actionName: "JS 查询") { input in
+        transformInput(actionKey: .actionQuery) { input in
             try JSONFormatterService.evaluateQuery(input, expression: expression)
         }
     }
 
     private func compactJSON() {
-        transformInput(actionName: "压缩", JSONFormatterService.compact)
+        transformInput(actionKey: .actionCompress, JSONFormatterService.compact)
     }
 
     private func escapeJSON() {
-        transformInput(actionName: "转义", JSONFormatterService.escape)
+        transformInput(actionKey: .actionEscape, JSONFormatterService.escape)
     }
 
     private func escapeAndCopyJSON() {
-        transformInput(actionName: "转义并复制", copyAfterSuccess: true, JSONFormatterService.escape)
+        transformInput(actionKey: .actionEscapeAndCopy, copyAfterSuccess: true, JSONFormatterService.escape)
     }
 
     private func transformInput(
-        actionName: String,
+        actionKey: LocKey,
         copyAfterSuccess: Bool = false,
         _ transform: @escaping @Sendable (String) throws -> String
     ) {
         let input = inputText
+        let actionName = l10n.t(actionKey)
         let transformID = UUID()
         activeTransformID = transformID
         isTransforming = true
@@ -1204,7 +1771,7 @@ struct ContentView: View {
                     }
                     logger.info("JSON \(actionName, privacy: .public) 成功，输出长度 \(output.text.count, privacy: .public)，大文件虚拟化 \(output.lineIndex.isVirtualized, privacy: .public)")
                 case .failure(let error):
-                    let message = "\(actionName)失败：\(error.localizedDescription)"
+                    let message = l10n.failure(actionKey, detail: error.localizedDescription)
                     errorMessage = message
                     updateCurrentPageAfterTransformFailure(message)
                     logger.error("JSON \(actionName, privacy: .public) 失败，输入长度 \(input.count, privacy: .public)，错误 \(error.localizedDescription, privacy: .public)")
@@ -1230,7 +1797,7 @@ struct ContentView: View {
     }
 
     private func copyOutput() {
-        copyToPasteboard(outputText, actionName: "复制结果")
+        copyToPasteboard(outputText, actionName: l10n.t(.actionCopyOutput))
     }
 
     private func copyToPasteboard(_ text: String, actionName: String) {
@@ -1311,19 +1878,12 @@ struct ContentView: View {
     }
 
     private func searchStatusText(matchCount: Int) -> String {
-        guard !searchQuery.isEmpty else {
-            return "输入关键词"
-        }
-
-        if isOutputSearchSkippedForSize {
-            return "输出过大，文本搜索已暂停"
-        }
-
-        guard matchCount > 0 else {
-            return "0 个匹配"
-        }
-
-        return "\(safeActiveMatchIndex + 1) / \(matchCount)"
+        l10n.searchStatus(
+            currentIndex: safeActiveMatchIndex,
+            matchCount: matchCount,
+            hasQuery: !searchQuery.isEmpty,
+            isPaused: isOutputSearchSkippedForSize
+        )
     }
 
     private func expandEntireTree() {
@@ -1380,9 +1940,12 @@ struct ContentView: View {
         }
     }
 
+    /// 顶栏快切：在 light↔dark 之间切换，依据当前有效外观决定去向，只写新键。
     private func toggleColorScheme() {
-        isDarkMode.toggle()
-        logger.info("切换 JSON Formatter 主题，当前为 \(isDarkMode ? "黑夜模式" : "日间模式", privacy: .public)")
+        let previousMode = appearanceMode
+        let nextMode: AppearanceMode = effectiveIsDarkMode ? .light : .dark
+        appearanceMode = nextMode
+        logger.info("顶栏切换 JSON Formatter 外观，原外观 \(previousMode.rawValue, privacy: .public)，当前外观 \(nextMode.rawValue, privacy: .public)")
     }
 
     private func checkLatestRelease() {
@@ -1457,6 +2020,7 @@ struct ContentView: View {
 
 private struct AutoPairingTextEditor: NSViewRepresentable {
     @Binding var text: String
+    var fontSize: CGFloat = NSFont.systemFontSize
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -1471,6 +2035,7 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         scrollView.drawsBackground = false
 
         let textView = AutoPairingTextView(frame: scrollView.contentView.bounds)
+        textView.jsonFontSize = fontSize
         textView.delegate = context.coordinator
         textView.autoPairingDelegate = context.coordinator
         textView.isEditable = true
@@ -1481,10 +2046,12 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         textView.usesFindBar = true
         textView.drawsBackground = false
         textView.disableSmartJSONInputSubstitutions()
-        textView.applyPlainJSONInputStyle()
+        textView.applyPlainJSONInputStyle(fontSize: fontSize)
         textView.textContainerInset = NSSize(width: 10, height: 10)
         JSONInputTextViewLayout.configure(textView)
-        textView.setPlainJSONInputString(text)
+        textView.setPlainJSONInputString(text, fontSize: fontSize)
+        context.coordinator.fontSize = fontSize
+        context.coordinator.lastFontSize = fontSize
 
         scrollView.documentView = textView
         return scrollView
@@ -1496,14 +2063,20 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         }
 
         context.coordinator.text = $text
+        context.coordinator.fontSize = fontSize
+        textView.jsonFontSize = fontSize
         textView.disableSmartJSONInputSubstitutions()
-        textView.applyPlainJSONInputStyle()
-        guard !context.coordinator.isUpdatingFromTextView, textView.string != text else {
+        textView.applyPlainJSONInputStyle(fontSize: fontSize)
+        // 字号变化需强制重设整段文本以刷新已有内容的字体（applyPlainJSONInputStyle 只影响
+        // typingAttributes / font，不会重排已存在字符的属性）。
+        let fontSizeChanged = context.coordinator.lastFontSize != fontSize
+        context.coordinator.lastFontSize = fontSize
+        guard !context.coordinator.isUpdatingFromTextView, textView.string != text || fontSizeChanged else {
             return
         }
 
         let selectedRanges = textView.selectedRanges
-        textView.setPlainJSONInputString(text)
+        textView.setPlainJSONInputString(text, fontSize: fontSize)
         textView.selectedRanges = clampedSelectionRanges(
             selectedRanges,
             preferredInsertionLocation: textView.string.utf16.count,
@@ -1514,6 +2087,8 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate, AutoPairingTextViewDelegate {
         var text: Binding<String>
         var isUpdatingFromTextView = false
+        var fontSize: CGFloat = NSFont.systemFontSize
+        var lastFontSize: CGFloat = NSFont.systemFontSize
 
         init(text: Binding<String>) {
             self.text = text
@@ -1604,10 +2179,10 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
             }
 
             let replacementRange = NSRange(location: range.location, length: (replacement as NSString).length)
-            textView.applyPlainJSONInputStyle()
+            textView.applyPlainJSONInputStyle(fontSize: fontSize)
             textStorage.replaceCharacters(in: range, with: NSAttributedString(
                 string: replacement,
-                attributes: textView.plainJSONInputAttributes
+                attributes: textView.plainJSONInputAttributes(fontSize: fontSize)
             ))
             textView.didChangeText()
             textView.setSelectedRange(selectedRangeAfterInsert ?? replacementRange)
@@ -1681,23 +2256,25 @@ private protocol AutoPairingTextViewDelegate: AnyObject {
 @MainActor
 private final class AutoPairingTextView: NSTextView {
     weak var autoPairingDelegate: AutoPairingTextViewDelegate?
+    /// 当前编辑器字号（设置弹窗可调，12–24pt）；SwiftUI 层每次 updateNSView 同步下来。
+    var jsonFontSize: CGFloat = NSFont.systemFontSize
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
     }
 
     override func becomeFirstResponder() -> Bool {
         let didBecomeFirstResponder = super.becomeFirstResponder()
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         return didBecomeFirstResponder
     }
 
     override func didChangeText() {
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         super.didChangeText()
     }
 
@@ -1709,7 +2286,7 @@ private final class AutoPairingTextView: NSTextView {
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         guard let text = insertString as? String, text.count == 1 else {
             super.insertText(insertString, replacementRange: replacementRange)
             return
@@ -1728,30 +2305,30 @@ private final class AutoPairingTextView: NSTextView {
 }
 
 private extension NSTextView {
-    var plainJSONInputAttributes: [NSAttributedString.Key: Any] {
+    func plainJSONInputAttributes(fontSize: CGFloat = NSFont.systemFontSize) -> [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            .font: AppTheme.editorFont(size: fontSize),
             .foregroundColor: NSColor.labelColor
         ]
     }
 
-    func applyPlainJSONInputStyle() {
-        font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    func applyPlainJSONInputStyle(fontSize: CGFloat = NSFont.systemFontSize) {
+        font = AppTheme.editorFont(size: fontSize)
         textColor = .labelColor
         insertionPointColor = .labelColor
-        typingAttributes = plainJSONInputAttributes
+        typingAttributes = plainJSONInputAttributes(fontSize: fontSize)
         selectedTextAttributes = [
             .backgroundColor: NSColor.selectedTextBackgroundColor,
             .foregroundColor: NSColor.selectedTextColor
         ]
     }
 
-    func setPlainJSONInputString(_ string: String) {
+    func setPlainJSONInputString(_ string: String, fontSize: CGFloat = NSFont.systemFontSize) {
         textStorage?.setAttributedString(NSAttributedString(
             string: string,
-            attributes: plainJSONInputAttributes
+            attributes: plainJSONInputAttributes(fontSize: fontSize)
         ))
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: fontSize)
     }
 
     func disableSmartJSONInputSubstitutions() {
@@ -1789,6 +2366,8 @@ private struct HighlightedOutputView: NSViewRepresentable {
     let currentMatchRange: NSRange?
     let renderRevision: Int
     let scrollRevision: Int
+    var language: AppLanguage = .cn
+    var fontSize: CGFloat = NSFont.systemFontSize
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1807,7 +2386,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.font = AppTheme.editorFont(size: fontSize)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = true
@@ -1840,19 +2419,25 @@ private struct HighlightedOutputView: NSViewRepresentable {
             lineIndex: lineIndex,
             isDarkMode: isDarkMode,
             matchRanges: matchRanges,
-            currentMatchIndex: currentMatchIndex
+            currentMatchIndex: currentMatchIndex,
+            language: language,
+            fontSize: fontSize
         )
 
         let usesPlainRendering = outputText.utf8.count > OutputRenderingPolicy.maxHighlightedBytes
         let usesVirtualizedRendering = lineIndex.isVirtualized
+        // 字号变化不会 bump renderRevision，但需要重排输出文本，故纳入所有分支判定。
+        let fontSizeChanged = context.coordinator.lastFontSize != fontSize
         let shouldUpdateText: Bool
         if usesVirtualizedRendering {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+                || fontSizeChanged
         } else if usesPlainRendering {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesPlainRendering != usesPlainRendering
                 || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+                || fontSizeChanged
         } else {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesPlainRendering != usesPlainRendering
@@ -1860,6 +2445,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
                 || context.coordinator.lastIsDarkMode != isDarkMode
                 || context.coordinator.lastMatchRanges != matchRanges
                 || context.coordinator.lastCurrentMatchIndex != currentMatchIndex
+                || fontSizeChanged
         }
 
         if shouldUpdateText {
@@ -1870,6 +2456,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
             context.coordinator.lastIsDarkMode = isDarkMode
             context.coordinator.lastMatchRanges = matchRanges
             context.coordinator.lastCurrentMatchIndex = currentMatchIndex
+            context.coordinator.lastFontSize = fontSize
         }
 
         guard context.coordinator.lastScrollRevision != scrollRevision else {
@@ -1901,13 +2488,14 @@ private struct HighlightedOutputView: NSViewRepresentable {
         if usesPlainRendering {
             textView.string = outputText
             textView.textColor = .labelColor
-            textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            textView.font = AppTheme.editorFont(size: fontSize)
             return
         }
 
         let attributedText = buildHighlightedJSONText(
             outputText,
             isDarkMode: isDarkMode,
+            fontSize: fontSize,
             matchRanges: matchRanges,
             currentMatchIndex: currentMatchIndex
         )
@@ -1929,8 +2517,11 @@ private struct HighlightedOutputView: NSViewRepresentable {
         var lastIsDarkMode = false
         var lastMatchRanges: [NSRange] = []
         var lastCurrentMatchIndex = 0
+        var lastFontSize: CGFloat = -1
+        var fontSize: CGFloat = NSFont.systemFontSize
         var renderedChunkIndex = 0
         var isUpdatingVirtualizedContent = false
+        var language: AppLanguage = .cn
 
         func configure(
             textView: NSTextView,
@@ -1939,7 +2530,9 @@ private struct HighlightedOutputView: NSViewRepresentable {
             lineIndex: OutputLineIndex,
             isDarkMode: Bool,
             matchRanges: [NSRange],
-            currentMatchIndex: Int
+            currentMatchIndex: Int,
+            language: AppLanguage,
+            fontSize: CGFloat
         ) {
             self.textView = textView
             self.scrollView = scrollView
@@ -1948,6 +2541,8 @@ private struct HighlightedOutputView: NSViewRepresentable {
             self.isDarkMode = isDarkMode
             self.matchRanges = matchRanges
             self.currentMatchIndex = currentMatchIndex
+            self.language = language
+            self.fontSize = fontSize
         }
 
         func resetVirtualizedRendering(scrollView: NSScrollView) {
@@ -1990,19 +2585,19 @@ private struct HighlightedOutputView: NSViewRepresentable {
             )
             let loadedLineCount = lineIndex.loadedLineCount(upToChunk: chunkEndIndex)
             let prefix = chunkStartIndex == 0
-                ? "大文件模式：已加载前 \(loadedLineCount) 行 / 共 \(lineIndex.lineCount) 行，继续向下滚动会加载后续内容。\n\n"
+                ? L10n(language: language).largeFileLoadedNotice(loadedLines: loadedLineCount, totalLines: lineIndex.lineCount)
                 : ""
 
             isUpdatingVirtualizedContent = true
             if chunkStartIndex == 0 {
                 textView.string = prefix + chunk
                 textView.textColor = .labelColor
-                textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+                textView.font = AppTheme.editorFont(size: fontSize)
             } else {
                 textView.textStorage?.append(NSAttributedString(
                     string: prefix + chunk,
                     attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+                        .font: AppTheme.editorFont(size: fontSize),
                         .foregroundColor: NSColor.labelColor
                     ]
                 ))
@@ -2066,12 +2661,12 @@ private enum OutputDisplayMode: String, CaseIterable, Identifiable {
         rawValue
     }
 
-    var title: String {
+    func title(_ l10n: L10n) -> String {
         switch self {
         case .text:
-            return "文本"
+            return l10n.t(.outputModeText)
         case .tree:
-            return "树状"
+            return l10n.t(.outputModeTree)
         }
     }
 }
@@ -2082,45 +2677,38 @@ private enum WorkspaceMode: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var title: String {
+    func title(_ l10n: L10n) -> String {
         switch self {
         case .format:
-            return "格式化"
+            return l10n.t(.format)
         case .diff:
-            return "JSON Diff"
+            return l10n.t(.jsonDiff)
         }
     }
 
-    var description: String {
+    func description(_ l10n: L10n) -> String {
         switch self {
         case .format:
-            return "粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+T 新建页面；Cmd+S 保存到侧边栏；Cmd+F 或 Ctrl+F 搜索输出。"
+            return l10n.language == .cn
+                ? "粘贴 JSON 后按 Cmd+Enter 格式化；Cmd+T 新建页面；Cmd+S 保存到侧边栏；Cmd+F 或 Ctrl+F 搜索输出。"
+                : "Paste JSON and press Cmd+Enter to format; Cmd+T for a new document; Cmd+S to save into the sidebar; Cmd+F or Ctrl+F to search output."
         case .diff:
-            return "左右输入两份 JSON 后按 Cmd+Enter 比较；对象键顺序会忽略，数组顺序仍参与比较，所有数据仅在本地处理。"
+            return l10n.language == .cn
+                ? "左右输入两份 JSON 后按 Cmd+Enter 比较；对象键顺序会忽略，数组顺序仍参与比较，所有数据仅在本地处理。"
+                : "Enter two JSON values and press Cmd+Enter to compare; object key order is ignored, array order still counts, all processing stays local."
         }
     }
 }
 
 private extension JSONDifferenceKind {
-    var title: String {
-        switch self {
-        case .added:
-            return "新增"
-        case .removed:
-            return "删除"
-        case .changed:
-            return "变更"
-        }
-    }
-
     var color: Color {
         switch self {
         case .added:
-            return .green
+            return AppTheme.stringValue
         case .removed:
-            return .red
+            return AppTheme.error
         case .changed:
-            return .orange
+            return AppTheme.accent
         }
     }
 }
@@ -2408,10 +2996,11 @@ private enum OutputRenderingPolicy {
 private func buildHighlightedJSONText(
     _ text: String,
     isDarkMode: Bool,
+    fontSize: CGFloat,
     matchRanges: [NSRange],
     currentMatchIndex: Int
 ) -> NSAttributedString {
-    let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    let font = AppTheme.editorFont(size: fontSize)
     let attributedText = NSMutableAttributedString(
         string: text,
         attributes: [

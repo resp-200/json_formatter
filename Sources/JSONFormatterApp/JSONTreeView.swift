@@ -5,6 +5,11 @@ struct JSONTreeView: View {
     @Binding var expandedNodeIDs: Set<String>
     let searchMatches: [JSONTreeSearchMatch]
     let currentMatchIndex: Int
+    var language: AppLanguage = .cn
+
+    private var l10n: L10n {
+        L10n(language: language)
+    }
 
     private var currentMatchID: String? {
         guard !searchMatches.isEmpty else {
@@ -25,9 +30,9 @@ struct JSONTreeView: View {
                 treeContent(root)
             } else {
                 ContentUnavailableView(
-                    "暂无可展示的 JSON 树",
+                    l10n.t(.treeEmptyTitle),
                     systemImage: "list.bullet.indent",
-                    description: Text("请先格式化或查询 JSON 输出。")
+                    description: Text(l10n.t(.treeEmptyDescription))
                 )
             }
         }
