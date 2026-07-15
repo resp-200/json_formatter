@@ -29,7 +29,8 @@
 
 不同层级使用不同颜色展示，支持关键字搜索：
 
-<img width="900" height="672" alt="Clipboard_Screenshot_1779088750" src="https://github.com/user-attachments/assets/068d9951-34c9-4af0-91b4-ea5fcb5a9642" />
+<img width="2278" height="1502" alt="Clipboard_Screenshot_1784113717" src="https://github.com/user-attachments/assets/237c8788-dbc4-4a52-b001-bcef690e1ff6" />
+
 
 ## 快捷键与常用操作
 
