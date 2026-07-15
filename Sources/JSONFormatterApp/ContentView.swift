@@ -88,10 +88,6 @@ struct ContentView: View {
         selectedPageID ?? pages.first?.id ?? JSONWorkspacePage.initial.id
     }
 
-    private var canSaveCurrentPage: Bool {
-        selectedPage != nil
-    }
-
     private var safeActiveMatchIndex: Int {
         guard activeMatchCount > 0 else {
             return 0
@@ -121,7 +117,9 @@ struct ContentView: View {
                 .frame(width: isSidebarCollapsed ? 72 : 260)
 
             mainEditorView()
-                .frame(minWidth: 720, maxWidth: .infinity, maxHeight: .infinity)
+                // 主区最小宽度收窄，让窗口能真正压缩而不裁切；双编辑卡片各自的
+                // 最小宽度在 mainEditorView 分栏处单独约束，确保窄窗口下不被挤没。
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.surfaceBright)
@@ -314,16 +312,27 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 4)
 
+            // Settings 弹出菜单：语言切换（原为日夜切换，已与顶栏对调）。
+            // 用 .menuStyle(.button) + .buttonStyle(.plain) 让 Menu 走与 Clear History
+            // 相同的 plain button 渲染路径，配合同一个 sidebarFooterRow，确保对齐一致。
             Menu {
-                Button(isDarkMode ? l10n.t(.toggleLightMode) : l10n.t(.toggleDarkMode)) {
-                    toggleColorScheme()
+                ForEach(AppLanguage.allCases) { candidate in
+                    Button {
+                        switchLanguage(to: candidate)
+                    } label: {
+                        if candidate == language {
+                            Label(candidate.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(candidate.displayName)
+                        }
+                    }
                 }
             } label: {
-                sidebarFooterRow(icon: "gearshape", title: l10n.t(.settings), tint: AppTheme.onSurfaceVariant)
+                sidebarFooterRow(icon: "globe", title: l10n.t(.settings), tint: AppTheme.onSurfaceVariant)
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 isClearHistoryConfirmationPresented = true
@@ -581,14 +590,18 @@ struct ContentView: View {
                         editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) {
                             queryExpressionBar()
                         }
+                        .frame(minWidth: 180)
                         outputEditor(title: l10n.t(.outputTitle))
+                            .frame(minWidth: 180)
                     }
                     .frame(maxHeight: .infinity)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(alignment: .top, spacing: 16) {
                             editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) { EmptyView() }
+                                .frame(minWidth: 180)
                             editor(title: l10n.t(.outputTitle), text: $diffRightText, showLineNumbers: false) { EmptyView() }
+                                .frame(minWidth: 180)
                         }
                         .frame(maxHeight: .infinity)
 
@@ -613,7 +626,9 @@ struct ContentView: View {
 
     private func topBar() -> some View {
         HStack(spacing: 12) {
-            actionBar()
+            // 按钮组做「溢出折叠」：宽时全部平铺，窄时放不下的次要按钮
+            // 自动收进右侧「更多」下拉菜单，主按钮始终在外。
+            adaptiveActionBar()
 
             Spacer(minLength: 12)
 
@@ -621,13 +636,16 @@ struct ContentView: View {
                 topBarSearchField()
             }
 
-            languageSwitcher()
+            // 顶栏放日夜切换（原为语言切换，已与侧边栏 Settings 对调）。
+            themeToggle()
 
-            Button(l10n.t(.saveOutput)) {
-                saveCurrentPage()
+            // 「清空」固定在顶栏最右（原保存按钮位置），不参与左侧按钮组的折叠。
+            Button(l10n.t(.clear)) {
+                clearAll()
             }
             .buttonStyle(SecondaryActionButtonStyle())
-            .disabled(!canSaveCurrentPage)
+            .disabled(isClearDisabled)
+            .layoutPriority(1)
         }
         .padding(.horizontal, 24)
         .frame(height: 60)
@@ -651,7 +669,7 @@ struct ContentView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(AppTheme.onSurface)
                 .focused($isSearchFocused)
-                .frame(width: 180)
+                .frame(minWidth: 110, idealWidth: 180, maxWidth: 180)
                 .onSubmit {
                     isSearchVisible = true
                     selectNextMatch(matchCount: activeMatchCount)
@@ -712,94 +730,152 @@ struct ContentView: View {
         }
     }
 
-    private func languageSwitcher() -> some View {
-        HStack(spacing: 2) {
-            ForEach(AppLanguage.allCases) { candidate in
-                let isSelected = candidate == language
-                Button {
-                    switchLanguage(to: candidate)
-                } label: {
-                    Text(candidate.shortLabel)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(isSelected ? AppTheme.primary : AppTheme.onSurfaceVariant)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(isSelected ? AppTheme.surface : Color.clear)
-                        )
-                        .shadow(color: isSelected ? Color.black.opacity(0.08) : Color.clear, radius: 1, y: 1)
-                }
-                .buttonStyle(.plain)
-            }
+    /// 顶栏日夜切换：太阳 / 月亮图标按钮，点击 toggle 主题。
+    private func themeToggle() -> some View {
+        Button {
+            toggleColorScheme()
+        } label: {
+            Image(systemName: isDarkMode ? "sun.max.fill" : "moon.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(AppTheme.onSurfaceVariant)
+                .frame(width: 30, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(AppTheme.surfaceContainerLow)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(AppTheme.outlineVariant, lineWidth: 1)
+                )
         }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(AppTheme.surfaceContainerLow)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(AppTheme.outlineVariant, lineWidth: 1)
-        )
+        .buttonStyle(.plain)
+        .help(isDarkMode ? l10n.t(.toggleLightMode) : l10n.t(.toggleDarkMode))
     }
 
-    @ViewBuilder
-    private func actionBar() -> some View {
-        HStack(spacing: 8) {
-            if workspaceMode == .format {
-                Button(isTransforming ? l10n.t(.formatting) : l10n.t(.format)) {
-                    formatJSON()
-                }
-                .buttonStyle(PrimaryActionButtonStyle())
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isTransforming)
+    /// 顶栏左侧操作按钮的描述数据，用于在平铺 / 折叠两种布局间复用同一份逻辑。
+    private struct ActionButtonSpec: Identifiable {
+        let id: String
+        let title: String
+        let isDisabled: Bool
+        let action: () -> Void
+    }
 
-                Button(l10n.t(.compress)) { compactJSON() }
-                    .buttonStyle(OutlineActionButtonStyle())
-                    .disabled(isTransforming)
+    /// 当前是否禁用「清空」：所有内容与状态均为空且非处理中。
+    private var isClearDisabled: Bool {
+        inputText.isEmpty && outputText.isEmpty && diffRightText.isEmpty
+            && diffResult == nil && errorMessage.isEmpty && searchQuery.isEmpty
+            && queryExpression.isEmpty && !isTransforming
+    }
 
-                Button(l10n.t(.jsonDiff)) { switchWorkspaceMode(to: .diff) }
-                    .buttonStyle(OutlineActionButtonStyle())
-                    .disabled(isTransforming)
-
-                Button(l10n.t(.escape)) { escapeJSON() }
-                    .buttonStyle(OutlineActionButtonStyle())
-                    .disabled(isTransforming)
-
-                Menu {
-                    Button(l10n.t(.escapeAndCopy)) { escapeAndCopyJSON() }
-                        .disabled(isTransforming)
-                    Button(l10n.t(.copyOutput)) { copyOutput() }
-                        .disabled(outputText.isEmpty || isTransforming)
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 30)
-            } else {
-                Button(isTransforming ? l10n.t(.comparing) : l10n.t(.compare)) {
-                    compareJSON()
-                }
-                .buttonStyle(PrimaryActionButtonStyle())
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isTransforming)
-
-                Button(l10n.t(.format)) { switchWorkspaceMode(to: .format) }
-                    .buttonStyle(OutlineActionButtonStyle())
-                    .disabled(isTransforming)
-            }
-
-            Button(l10n.t(.clear)) {
-                clearAll()
-            }
-            .buttonStyle(OutlineActionButtonStyle())
-            .disabled(
-                inputText.isEmpty && outputText.isEmpty && diffRightText.isEmpty
-                    && diffResult == nil && errorMessage.isEmpty && searchQuery.isEmpty
-                    && queryExpression.isEmpty && !isTransforming
-            )
+    /// 可折叠的次要按钮（描边），顺序即优先级：靠后的先被收进「更多」菜单。
+    /// 注意：「清空」不在此列——它固定在顶栏最右，不参与折叠。
+    private var collapsibleActionSpecs: [ActionButtonSpec] {
+        if workspaceMode == .format {
+            return [
+                ActionButtonSpec(id: "compress", title: l10n.t(.compress), isDisabled: isTransforming) {
+                    compactJSON()
+                },
+                ActionButtonSpec(id: "diff", title: l10n.t(.jsonDiff), isDisabled: isTransforming) {
+                    switchWorkspaceMode(to: .diff)
+                },
+                ActionButtonSpec(id: "escape", title: l10n.t(.escape), isDisabled: isTransforming) {
+                    escapeJSON()
+                },
+            ]
         }
+        return [
+            ActionButtonSpec(id: "toFormat", title: l10n.t(.format), isDisabled: isTransforming) {
+                switchWorkspaceMode(to: .format)
+            },
+        ]
+    }
+
+    /// 仅存在于「更多」菜单里的动作（转义并复制 / 复制结果），沿用原 ellipsis 菜单。
+    private var overflowOnlyActionSpecs: [ActionButtonSpec] {
+        guard workspaceMode == .format else {
+            return []
+        }
+        return [
+            ActionButtonSpec(id: "escapeAndCopy", title: l10n.t(.escapeAndCopy), isDisabled: isTransforming) {
+                escapeAndCopyJSON()
+            },
+            ActionButtonSpec(id: "copyOutput", title: l10n.t(.copyOutput), isDisabled: outputText.isEmpty || isTransforming) {
+                copyOutput()
+            },
+        ]
+    }
+
+    /// 顶栏主按钮（格式化 / 比较）：始终保留在外，带 Cmd+Enter 快捷键。
+    @ViewBuilder
+    private func primaryActionButton() -> some View {
+        if workspaceMode == .format {
+            Button(isTransforming ? l10n.t(.formatting) : l10n.t(.format)) {
+                formatJSON()
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .keyboardShortcut(.return, modifiers: [.command])
+            .disabled(isTransforming)
+        } else {
+            Button(isTransforming ? l10n.t(.comparing) : l10n.t(.compare)) {
+                compareJSON()
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .keyboardShortcut(.return, modifiers: [.command])
+            .disabled(isTransforming)
+        }
+    }
+
+    /// 溢出折叠的操作按钮组：用 ViewThatFits 从「全部平铺」到「逐步折叠进菜单」
+    /// 挑选第一个能放下的候选布局，去掉了原横向 ScrollView 包裹，避免闪烁。
+    @ViewBuilder
+    private func adaptiveActionBar() -> some View {
+        let collapsible = collapsibleActionSpecs
+        // 显式枚举候选，避免 ViewThatFits 把 ForEach 当作单一候选。
+        // 可折叠按钮当前最多 3 个（格式化模式：压缩 / Diff / 转义），从全平铺逐级折叠；
+        // visibleCount 大于实际数量时 prefix 自动截断，与低位候选等价，
+        // ViewThatFits 取首个能放下者，无副作用（保留 4 位候选为将来扩展留余量）。
+        ViewThatFits(in: .horizontal) {
+            actionBarCandidate(visibleCount: 4, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 3, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 2, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 1, collapsible: collapsible)
+            actionBarCandidate(visibleCount: 0, collapsible: collapsible)
+        }
+    }
+
+    /// 单个候选布局：前 `visibleCount` 个次要按钮平铺，其余与「仅菜单项」合并进「更多」菜单。
+    private func actionBarCandidate(visibleCount: Int, collapsible: [ActionButtonSpec]) -> some View {
+        let visible = Array(collapsible.prefix(visibleCount))
+        let overflow = Array(collapsible.dropFirst(visibleCount)) + overflowOnlyActionSpecs
+        return HStack(spacing: 8) {
+            primaryActionButton()
+
+            ForEach(visible) { spec in
+                Button(spec.title) { spec.action() }
+                    .buttonStyle(OutlineActionButtonStyle())
+                    .disabled(spec.isDisabled)
+            }
+
+            if !overflow.isEmpty {
+                overflowActionMenu(overflow)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// 「更多」下拉菜单，收纳折叠掉的按钮与仅菜单项。
+    private func overflowActionMenu(_ specs: [ActionButtonSpec]) -> some View {
+        Menu {
+            ForEach(specs) { spec in
+                Button(spec.title) { spec.action() }
+                    .disabled(spec.isDisabled)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 30)
+        .help(l10n.t(.more))
     }
 
     @ViewBuilder

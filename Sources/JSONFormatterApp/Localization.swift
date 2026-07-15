@@ -7,13 +7,13 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// 分段控件展示用短标签。
-    var shortLabel: String {
+    /// 菜单展示用名称，以各自母语呈现（不随界面语言变化）。
+    var displayName: String {
         switch self {
         case .en:
-            return "EN"
+            return "English"
         case .cn:
-            return "CN"
+            return "中文"
         }
     }
 }
@@ -59,9 +59,9 @@ enum LocKey {
     case escapeAndCopy
     case copyOutput
     case clear
+    case more
     case compare
     case comparing
-    case saveOutput
     case searchPlaceholder
 
     // 面板
@@ -237,9 +237,9 @@ struct L10n {
         .escapeAndCopy: ("转义并复制", "Escape & Copy"),
         .copyOutput: ("复制结果", "Copy"),
         .clear: ("清空", "Clear"),
+        .more: ("更多", "More"),
         .compare: ("比较 JSON", "Compare"),
         .comparing: ("比较中...", "Comparing..."),
-        .saveOutput: ("保存", "Save Output"),
         .searchPlaceholder: ("搜索输出...", "Search in output..."),
 
         .inputTitle: ("输入", "INPUT"),

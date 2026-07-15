@@ -74,6 +74,8 @@ struct PrimaryActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .medium))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(Color.white)
             .padding(.horizontal, 16)
             .padding(.vertical, 7)
@@ -92,6 +94,8 @@ struct SecondaryActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .medium))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(Color.white)
             .padding(.horizontal, 16)
             .padding(.vertical, 7)
@@ -110,6 +114,8 @@ struct OutlineActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .medium))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(AppTheme.onSurface.opacity(isEnabled ? 1 : 0.4))
             .padding(.horizontal, 14)
             .padding(.vertical, 7)

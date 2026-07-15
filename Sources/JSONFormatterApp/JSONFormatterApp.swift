@@ -15,7 +15,10 @@ struct JSONFormatterApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(externalInputStore: externalInputStore)
-                .frame(minWidth: 900, minHeight: 640)
+                // 窗口最小宽度需自洽覆盖内部内容最小宽度，避免缩到最小时裁切：
+                // 侧边栏固定 260 + 主区内容最小宽度（顶栏折叠后约 470 主导，双编辑卡片 424）
+                // ≈ 730，取 820 留 ~90px 余量。宁可窗口最小值稍大也不裁切。
+                .frame(minWidth: 820, minHeight: 640)
                 .onOpenURL { url in
                     guard let text = JSONInputRouter.text(from: url) else {
                         return
