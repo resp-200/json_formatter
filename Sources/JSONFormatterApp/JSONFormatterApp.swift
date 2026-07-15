@@ -6,6 +6,11 @@ import SwiftUI
 struct JSONFormatterApp: App {
     @NSApplicationDelegateAdaptor(JSONFormatterAppDelegate.self) private var appDelegate
     @StateObject private var externalInputStore = ExternalJSONInputStore.shared
+    @AppStorage("jsonFormatterLanguage") private var languageRaw = AppLanguage.cn.rawValue
+
+    private var l10n: L10n {
+        L10n(language: AppLanguage(rawValue: languageRaw) ?? .cn)
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -20,22 +25,22 @@ struct JSONFormatterApp: App {
         }
         .commands {
             CommandGroup(after: .textEditing) {
-                Button("格式化 JSON") {
+                Button(l10n.t(.menuFormat)) {
                     NotificationCenter.default.post(name: .formatJSONRequested, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
 
-                Button("保存当前 JSON 页面") {
+                Button(l10n.t(.menuSavePage)) {
                     NotificationCenter.default.post(name: .saveJSONPageRequested, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: [.command])
 
-                Button("新建 JSON 页面") {
+                Button(l10n.t(.menuNewPage)) {
                     NotificationCenter.default.post(name: .newJSONPageRequested, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: [.command])
 
-                Button("搜索输出 JSON") {
+                Button(l10n.t(.menuFindOutput)) {
                     NotificationCenter.default.post(name: .findOutputRequested, object: nil)
                 }
                 .keyboardShortcut("f", modifiers: [.command])
