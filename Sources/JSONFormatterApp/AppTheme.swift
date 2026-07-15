@@ -40,6 +40,14 @@ enum AppTheme {
     /// 描边变体（分隔线 / 卡片边框）。
     static let outlineVariant = dynamic(light: 0xe2e8f0, dark: 0x30363d)
 
+    // MARK: - 编辑器字体
+
+    /// 编辑器统一等宽字体入口。输入 / 输出编辑器的字号可配置（设置弹窗 12–24pt），
+    /// 集中在此构造，避免各处散落 `NSFont.monospacedSystemFont(ofSize:...)` 且字号不一致。
+    static func editorFont(size: CGFloat) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     // MARK: - 构造工具
 
     private static func color(_ hex: Int) -> Color {

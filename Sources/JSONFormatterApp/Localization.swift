@@ -18,6 +18,29 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+/// 外观模式。rawValue 用于 `@AppStorage` 持久化，与显示文案解耦。
+/// - light / dark：显式指定亮/暗；
+/// - system：跟随操作系统外观（`preferredColorScheme(nil)`）。
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case light
+    case dark
+    case system
+
+    var id: String { rawValue }
+
+    /// 设置弹窗外观卡片标题，走本地化查表。
+    func title(_ l10n: L10n) -> String {
+        switch self {
+        case .light:
+            return l10n.t(.appearanceLight)
+        case .dark:
+            return l10n.t(.appearanceDark)
+        case .system:
+            return l10n.t(.appearanceSystem)
+        }
+    }
+}
+
 /// 所有可见文案的 key，穷举界面中出现的中/英文字符串。
 enum LocKey {
     // 菜单
@@ -34,6 +57,22 @@ enum LocKey {
     case settings
     case toggleDarkMode
     case toggleLightMode
+
+    // 设置弹窗
+    case settingsTitle
+    case settingsLanguage
+    case settingsLanguageDesc
+    case settingsAppearance
+    case settingsAppearanceDesc
+    case appearanceLight
+    case appearanceDark
+    case appearanceSystem
+    case settingsFontSize
+    case settingsFontSizeDesc
+    case settingsAutoSave
+    case settingsAutoSaveDesc
+    case settingsDone
+    case settingsClose
     case clearHistory
     case clearHistoryConfirmTitle
     case clearHistoryConfirmMessage
@@ -211,6 +250,21 @@ struct L10n {
         .settings: ("设置", "Settings"),
         .toggleDarkMode: ("切换到黑夜模式", "Switch to Dark Mode"),
         .toggleLightMode: ("切换到日间模式", "Switch to Light Mode"),
+
+        .settingsTitle: ("设置", "Settings"),
+        .settingsLanguage: ("语言", "Language"),
+        .settingsLanguageDesc: ("选择界面显示语言", "Choose the interface language"),
+        .settingsAppearance: ("外观", "Appearance"),
+        .settingsAppearanceDesc: ("选择亮色、暗色或跟随系统", "Choose light, dark, or follow the system"),
+        .appearanceLight: ("日间", "Light"),
+        .appearanceDark: ("黑夜", "Dark"),
+        .appearanceSystem: ("跟随系统", "System"),
+        .settingsFontSize: ("编辑器字号", "Editor Font Size"),
+        .settingsFontSizeDesc: ("调整输入与输出编辑器的文字大小", "Adjust the text size of the input and output editors"),
+        .settingsAutoSave: ("自动保存", "Auto-save"),
+        .settingsAutoSaveDesc: ("编辑内容后自动保存当前页面", "Automatically save the current page after edits"),
+        .settingsDone: ("完成", "Done"),
+        .settingsClose: ("关闭设置", "Close Settings"),
         .clearHistory: ("清空历史", "Clear History"),
         .clearHistoryConfirmTitle: ("清空全部文档历史？", "Clear all document history?"),
         .clearHistoryConfirmMessage: (

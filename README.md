@@ -52,6 +52,13 @@ $.items.length
 
 ## Changelog
 
+### JSON Formatter 1.3.0
+
+- Redesigned Settings into a centered modal covering language, appearance, editor font size, and auto-save.
+- Added a System appearance option that follows the OS light/dark setting, alongside the existing Light and Dark modes.
+- Added an adjustable editor font size (12–24px) that applies live to both the input and output editors.
+- Added auto-save: when enabled, edits are debounced and persisted automatically so pages no longer show as unsaved.
+
 ### JSON Formatter 1.2.0
 
 - Added semantic JSON Diff: object key order is ignored at every level, while array order remains significant, with added, removed, and changed values shown by stable JSON paths.

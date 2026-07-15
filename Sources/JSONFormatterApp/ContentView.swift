@@ -4,9 +4,16 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var externalInputStore: ExternalJSONInputStore
-    @AppStorage("jsonFormatterIsDarkMode") private var isDarkMode = false
+    // 旧外观键：保留只读用于迁移，切换外观只写新键 jsonFormatterAppearanceMode（向后兼容）。
+    @AppStorage("jsonFormatterIsDarkMode") private var legacyIsDarkMode = false
+    @AppStorage("jsonFormatterAppearanceMode") private var appearanceModeRaw = ""
+    @AppStorage("jsonFormatterEditorFontSize") private var editorFontSize = 13.0
+    @AppStorage("jsonFormatterAutoSave") private var autoSave = false
     @AppStorage("jsonFormatterLanguage") private var languageRaw = AppLanguage.cn.rawValue
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var isClearHistoryConfirmationPresented = false
+    @State private var isSettingsPresented = false
+    @State private var autoSaveDebounceTask: Task<Void, Never>?
 
     @State private var inputText = ""
     @State private var outputText = ""
@@ -53,6 +60,45 @@ struct ContentView: View {
 
     private var l10n: L10n {
         L10n(language: language)
+    }
+
+    /// 当前外观模式。老用户从未写过新键（空串）时回退用旧 `legacyIsDarkMode` 推导，
+    /// 保证升级不丢外观偏好；固化到新键在 onAppear 的 `migrateAppearanceModeIfNeeded()` 完成。
+    private var appearanceMode: AppearanceMode {
+        get {
+            if let mode = AppearanceMode(rawValue: appearanceModeRaw) {
+                return mode
+            }
+            return legacyIsDarkMode ? .dark : .light
+        }
+        nonmutating set {
+            appearanceModeRaw = newValue.rawValue
+        }
+    }
+
+    /// 有效暗色：喂给 NSTextView 高亮配色（buildHighlightedJSONText / depthColors）。
+    /// system 模式下读环境 colorScheme（此时 preferredColorScheme(nil)，环境即系统解析值）。
+    private var effectiveIsDarkMode: Bool {
+        switch appearanceMode {
+        case .light:
+            return false
+        case .dark:
+            return true
+        case .system:
+            return systemColorScheme == .dark
+        }
+    }
+
+    /// SwiftUI 强制外观：light→.light，dark→.dark，system→nil（跟随系统）。
+    private var preferredColorScheme: ColorScheme? {
+        switch appearanceMode {
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        case .system:
+            return nil
+        }
     }
 
     private var safeCurrentMatchIndex: Int {
@@ -124,8 +170,22 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.surfaceBright)
         .tint(AppTheme.primary)
-        .preferredColorScheme(isDarkMode ? .dark : .light)
+        .preferredColorScheme(preferredColorScheme)
+        .sheet(isPresented: $isSettingsPresented) {
+            SettingsModalView(
+                languageRaw: $languageRaw,
+                appearanceMode: Binding(get: { appearanceMode }, set: { appearanceMode = $0 }),
+                editorFontSize: $editorFontSize,
+                autoSave: $autoSave,
+                l10n: l10n,
+                onDone: { isSettingsPresented = false }
+            )
+        }
+        .onChange(of: autoSave) { _, isOn in
+            handleAutoSaveToggle(isOn)
+        }
         .onAppear {
+            migrateAppearanceModeIfNeeded()
             loadPersistedWorkspaceIfNeeded()
             installFindShortcutMonitor()
             checkLatestRelease()
@@ -312,27 +372,14 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 4)
 
-            // Settings 弹出菜单：语言切换（原为日夜切换，已与顶栏对调）。
-            // 用 .menuStyle(.button) + .buttonStyle(.plain) 让 Menu 走与 Clear History
-            // 相同的 plain button 渲染路径，配合同一个 sidebarFooterRow，确保对齐一致。
-            Menu {
-                ForEach(AppLanguage.allCases) { candidate in
-                    Button {
-                        switchLanguage(to: candidate)
-                    } label: {
-                        if candidate == language {
-                            Label(candidate.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(candidate.displayName)
-                        }
-                    }
-                }
+            // Settings 入口：点击弹出居中设置弹窗（语言 / 外观 / 字号 / 自动保存）。
+            // 原语言下拉菜单已迁移进弹窗的语言分区。
+            Button {
+                openSettings()
             } label: {
-                sidebarFooterRow(icon: "globe", title: l10n.t(.settings), tint: AppTheme.onSurfaceVariant)
+                sidebarFooterRow(icon: "gearshape", title: l10n.t(.settings), tint: AppTheme.onSurfaceVariant)
             }
-            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuIndicator(.hidden)
 
             Button {
                 isClearHistoryConfirmationPresented = true
@@ -730,12 +777,13 @@ struct ContentView: View {
         }
     }
 
-    /// 顶栏日夜切换：太阳 / 月亮图标按钮，点击 toggle 主题。
+    /// 顶栏日夜快切：太阳 / 月亮图标按钮。语义为在 light↔dark 间显式切换
+    /// （依据当前有效外观决定去向），System 只能从设置弹窗进入。
     private func themeToggle() -> some View {
         Button {
             toggleColorScheme()
         } label: {
-            Image(systemName: isDarkMode ? "sun.max.fill" : "moon.fill")
+            Image(systemName: effectiveIsDarkMode ? "sun.max.fill" : "moon.fill")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(AppTheme.onSurfaceVariant)
                 .frame(width: 30, height: 30)
@@ -749,7 +797,7 @@ struct ContentView: View {
                 )
         }
         .buttonStyle(.plain)
-        .help(isDarkMode ? l10n.t(.toggleLightMode) : l10n.t(.toggleDarkMode))
+        .help(effectiveIsDarkMode ? l10n.t(.toggleLightMode) : l10n.t(.toggleDarkMode))
     }
 
     /// 顶栏左侧操作按钮的描述数据，用于在平铺 / 折叠两种布局间复用同一份逻辑。
@@ -988,6 +1036,9 @@ struct ContentView: View {
         }
 
         updateCurrentPageForUnsavedChanges()
+        if autoSave {
+            scheduleAutoSave()
+        }
     }
 
     private func updateCurrentPageForUnsavedChanges() {
@@ -1107,12 +1158,65 @@ struct ContentView: View {
         logger.info("切换 JSON 工作模式，当前为 \(mode.rawValue, privacy: .public)")
     }
 
-    private func switchLanguage(to candidate: AppLanguage) {
-        guard candidate.rawValue != languageRaw else {
+    /// 首次运行迁移：老用户从未写过新外观键（空串）时，用旧 `legacyIsDarkMode`
+    /// 推导并固化到新键，避免升级丢外观偏好。旧键保留不动（向后兼容 / 可回滚）。
+    private func migrateAppearanceModeIfNeeded() {
+        guard appearanceModeRaw.isEmpty else {
             return
         }
-        languageRaw = candidate.rawValue
-        logger.info("切换界面语言，当前为 \(candidate.rawValue, privacy: .public)")
+        let migrated: AppearanceMode = legacyIsDarkMode ? .dark : .light
+        appearanceModeRaw = migrated.rawValue
+        logger.info("迁移外观偏好到新键，旧暗色开关 \(legacyIsDarkMode, privacy: .public)，迁移后外观 \(migrated.rawValue, privacy: .public)")
+    }
+
+    private func openSettings() {
+        isSettingsPresented = true
+        logger.info("打开设置弹窗，当前语言 \(languageRaw, privacy: .public)，当前外观 \(appearanceMode.rawValue, privacy: .public)，当前字号 \(editorFontSize, privacy: .public)，自动保存 \(autoSave, privacy: .public)")
+    }
+
+    /// 自动保存开关变化：开启的瞬间对当前页触发一次保存（不批量处理历史页），
+    /// 关闭则取消待执行的防抖任务，回到手动保存行为。
+    private func handleAutoSaveToggle(_ isOn: Bool) {
+        logger.info("切换自动保存开关，当前为 \(isOn ? "开启" : "关闭", privacy: .public)")
+        if isOn {
+            commitAutoSave()
+        } else {
+            autoSaveDebounceTask?.cancel()
+            autoSaveDebounceTask = nil
+        }
+    }
+
+    /// 防抖调度自动保存：编辑内容后 600ms 无新编辑则落盘，避免连续输入频繁写盘。
+    private func scheduleAutoSave() {
+        autoSaveDebounceTask?.cancel()
+        autoSaveDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await MainActor.run {
+                commitAutoSave()
+            }
+        }
+    }
+
+    /// 提交一次自动保存：将当前页标记为已保存并立即持久化。
+    private func commitAutoSave() {
+        guard didLoadPersistedWorkspace else {
+            return
+        }
+        initializePageSelectionIfNeeded()
+        let pageID = activePageID
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return
+        }
+
+        let savedAt = Date()
+        pages[pageIndex].snapshot = currentPageSnapshot()
+        pages[pageIndex].updatedAt = savedAt
+        pages[pageIndex].markSaved(at: savedAt)
+        persistWorkspaceNow(reason: "自动保存当前 JSON 页面")
+        logger.info("自动保存当前 JSON 页面成功，页面标识 \(pageID.uuidString, privacy: .public)，输入长度 \(inputText.count, privacy: .public)，输出长度 \(outputText.count, privacy: .public)")
     }
 
     private func updateCurrentPageAfterTransform(with output: OutputTransformResult) {
@@ -1329,7 +1433,7 @@ struct ContentView: View {
 
             Divider()
 
-            AutoPairingTextEditor(text: text)
+            AutoPairingTextEditor(text: text, fontSize: CGFloat(editorFontSize))
                 .background(AppTheme.surface)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -1445,13 +1549,14 @@ struct ContentView: View {
                         HighlightedOutputView(
                             outputText: outputText,
                             lineIndex: outputLineIndex,
-                            isDarkMode: isDarkMode,
+                            isDarkMode: effectiveIsDarkMode,
                             matchRanges: outputMatchRanges,
                             currentMatchIndex: safeCurrentMatchIndex,
                             currentMatchRange: currentMatchRange,
                             renderRevision: outputRenderRevision,
                             scrollRevision: outputScrollRevision,
-                            language: language
+                            language: language,
+                            fontSize: CGFloat(editorFontSize)
                         )
                     case .tree:
                         JSONTreeView(
@@ -1835,9 +1940,12 @@ struct ContentView: View {
         }
     }
 
+    /// 顶栏快切：在 light↔dark 之间切换，依据当前有效外观决定去向，只写新键。
     private func toggleColorScheme() {
-        isDarkMode.toggle()
-        logger.info("切换 JSON Formatter 主题，当前为 \(isDarkMode ? "黑夜模式" : "日间模式", privacy: .public)")
+        let previousMode = appearanceMode
+        let nextMode: AppearanceMode = effectiveIsDarkMode ? .light : .dark
+        appearanceMode = nextMode
+        logger.info("顶栏切换 JSON Formatter 外观，原外观 \(previousMode.rawValue, privacy: .public)，当前外观 \(nextMode.rawValue, privacy: .public)")
     }
 
     private func checkLatestRelease() {
@@ -1912,6 +2020,7 @@ struct ContentView: View {
 
 private struct AutoPairingTextEditor: NSViewRepresentable {
     @Binding var text: String
+    var fontSize: CGFloat = NSFont.systemFontSize
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -1926,6 +2035,7 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         scrollView.drawsBackground = false
 
         let textView = AutoPairingTextView(frame: scrollView.contentView.bounds)
+        textView.jsonFontSize = fontSize
         textView.delegate = context.coordinator
         textView.autoPairingDelegate = context.coordinator
         textView.isEditable = true
@@ -1936,10 +2046,12 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         textView.usesFindBar = true
         textView.drawsBackground = false
         textView.disableSmartJSONInputSubstitutions()
-        textView.applyPlainJSONInputStyle()
+        textView.applyPlainJSONInputStyle(fontSize: fontSize)
         textView.textContainerInset = NSSize(width: 10, height: 10)
         JSONInputTextViewLayout.configure(textView)
-        textView.setPlainJSONInputString(text)
+        textView.setPlainJSONInputString(text, fontSize: fontSize)
+        context.coordinator.fontSize = fontSize
+        context.coordinator.lastFontSize = fontSize
 
         scrollView.documentView = textView
         return scrollView
@@ -1951,14 +2063,20 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         }
 
         context.coordinator.text = $text
+        context.coordinator.fontSize = fontSize
+        textView.jsonFontSize = fontSize
         textView.disableSmartJSONInputSubstitutions()
-        textView.applyPlainJSONInputStyle()
-        guard !context.coordinator.isUpdatingFromTextView, textView.string != text else {
+        textView.applyPlainJSONInputStyle(fontSize: fontSize)
+        // 字号变化需强制重设整段文本以刷新已有内容的字体（applyPlainJSONInputStyle 只影响
+        // typingAttributes / font，不会重排已存在字符的属性）。
+        let fontSizeChanged = context.coordinator.lastFontSize != fontSize
+        context.coordinator.lastFontSize = fontSize
+        guard !context.coordinator.isUpdatingFromTextView, textView.string != text || fontSizeChanged else {
             return
         }
 
         let selectedRanges = textView.selectedRanges
-        textView.setPlainJSONInputString(text)
+        textView.setPlainJSONInputString(text, fontSize: fontSize)
         textView.selectedRanges = clampedSelectionRanges(
             selectedRanges,
             preferredInsertionLocation: textView.string.utf16.count,
@@ -1969,6 +2087,8 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate, AutoPairingTextViewDelegate {
         var text: Binding<String>
         var isUpdatingFromTextView = false
+        var fontSize: CGFloat = NSFont.systemFontSize
+        var lastFontSize: CGFloat = NSFont.systemFontSize
 
         init(text: Binding<String>) {
             self.text = text
@@ -2059,10 +2179,10 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
             }
 
             let replacementRange = NSRange(location: range.location, length: (replacement as NSString).length)
-            textView.applyPlainJSONInputStyle()
+            textView.applyPlainJSONInputStyle(fontSize: fontSize)
             textStorage.replaceCharacters(in: range, with: NSAttributedString(
                 string: replacement,
-                attributes: textView.plainJSONInputAttributes
+                attributes: textView.plainJSONInputAttributes(fontSize: fontSize)
             ))
             textView.didChangeText()
             textView.setSelectedRange(selectedRangeAfterInsert ?? replacementRange)
@@ -2136,23 +2256,25 @@ private protocol AutoPairingTextViewDelegate: AnyObject {
 @MainActor
 private final class AutoPairingTextView: NSTextView {
     weak var autoPairingDelegate: AutoPairingTextViewDelegate?
+    /// 当前编辑器字号（设置弹窗可调，12–24pt）；SwiftUI 层每次 updateNSView 同步下来。
+    var jsonFontSize: CGFloat = NSFont.systemFontSize
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
     }
 
     override func becomeFirstResponder() -> Bool {
         let didBecomeFirstResponder = super.becomeFirstResponder()
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         return didBecomeFirstResponder
     }
 
     override func didChangeText() {
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         super.didChangeText()
     }
 
@@ -2164,7 +2286,7 @@ private final class AutoPairingTextView: NSTextView {
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         disableSmartJSONInputSubstitutions()
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: jsonFontSize)
         guard let text = insertString as? String, text.count == 1 else {
             super.insertText(insertString, replacementRange: replacementRange)
             return
@@ -2183,30 +2305,30 @@ private final class AutoPairingTextView: NSTextView {
 }
 
 private extension NSTextView {
-    var plainJSONInputAttributes: [NSAttributedString.Key: Any] {
+    func plainJSONInputAttributes(fontSize: CGFloat = NSFont.systemFontSize) -> [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            .font: AppTheme.editorFont(size: fontSize),
             .foregroundColor: NSColor.labelColor
         ]
     }
 
-    func applyPlainJSONInputStyle() {
-        font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    func applyPlainJSONInputStyle(fontSize: CGFloat = NSFont.systemFontSize) {
+        font = AppTheme.editorFont(size: fontSize)
         textColor = .labelColor
         insertionPointColor = .labelColor
-        typingAttributes = plainJSONInputAttributes
+        typingAttributes = plainJSONInputAttributes(fontSize: fontSize)
         selectedTextAttributes = [
             .backgroundColor: NSColor.selectedTextBackgroundColor,
             .foregroundColor: NSColor.selectedTextColor
         ]
     }
 
-    func setPlainJSONInputString(_ string: String) {
+    func setPlainJSONInputString(_ string: String, fontSize: CGFloat = NSFont.systemFontSize) {
         textStorage?.setAttributedString(NSAttributedString(
             string: string,
-            attributes: plainJSONInputAttributes
+            attributes: plainJSONInputAttributes(fontSize: fontSize)
         ))
-        applyPlainJSONInputStyle()
+        applyPlainJSONInputStyle(fontSize: fontSize)
     }
 
     func disableSmartJSONInputSubstitutions() {
@@ -2245,6 +2367,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
     let renderRevision: Int
     let scrollRevision: Int
     var language: AppLanguage = .cn
+    var fontSize: CGFloat = NSFont.systemFontSize
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -2263,7 +2386,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.font = AppTheme.editorFont(size: fontSize)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = true
@@ -2297,19 +2420,24 @@ private struct HighlightedOutputView: NSViewRepresentable {
             isDarkMode: isDarkMode,
             matchRanges: matchRanges,
             currentMatchIndex: currentMatchIndex,
-            language: language
+            language: language,
+            fontSize: fontSize
         )
 
         let usesPlainRendering = outputText.utf8.count > OutputRenderingPolicy.maxHighlightedBytes
         let usesVirtualizedRendering = lineIndex.isVirtualized
+        // 字号变化不会 bump renderRevision，但需要重排输出文本，故纳入所有分支判定。
+        let fontSizeChanged = context.coordinator.lastFontSize != fontSize
         let shouldUpdateText: Bool
         if usesVirtualizedRendering {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+                || fontSizeChanged
         } else if usesPlainRendering {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesPlainRendering != usesPlainRendering
                 || context.coordinator.lastUsesVirtualizedRendering != usesVirtualizedRendering
+                || fontSizeChanged
         } else {
             shouldUpdateText = context.coordinator.lastRenderRevision != renderRevision
                 || context.coordinator.lastUsesPlainRendering != usesPlainRendering
@@ -2317,6 +2445,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
                 || context.coordinator.lastIsDarkMode != isDarkMode
                 || context.coordinator.lastMatchRanges != matchRanges
                 || context.coordinator.lastCurrentMatchIndex != currentMatchIndex
+                || fontSizeChanged
         }
 
         if shouldUpdateText {
@@ -2327,6 +2456,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
             context.coordinator.lastIsDarkMode = isDarkMode
             context.coordinator.lastMatchRanges = matchRanges
             context.coordinator.lastCurrentMatchIndex = currentMatchIndex
+            context.coordinator.lastFontSize = fontSize
         }
 
         guard context.coordinator.lastScrollRevision != scrollRevision else {
@@ -2358,13 +2488,14 @@ private struct HighlightedOutputView: NSViewRepresentable {
         if usesPlainRendering {
             textView.string = outputText
             textView.textColor = .labelColor
-            textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            textView.font = AppTheme.editorFont(size: fontSize)
             return
         }
 
         let attributedText = buildHighlightedJSONText(
             outputText,
             isDarkMode: isDarkMode,
+            fontSize: fontSize,
             matchRanges: matchRanges,
             currentMatchIndex: currentMatchIndex
         )
@@ -2386,6 +2517,8 @@ private struct HighlightedOutputView: NSViewRepresentable {
         var lastIsDarkMode = false
         var lastMatchRanges: [NSRange] = []
         var lastCurrentMatchIndex = 0
+        var lastFontSize: CGFloat = -1
+        var fontSize: CGFloat = NSFont.systemFontSize
         var renderedChunkIndex = 0
         var isUpdatingVirtualizedContent = false
         var language: AppLanguage = .cn
@@ -2398,7 +2531,8 @@ private struct HighlightedOutputView: NSViewRepresentable {
             isDarkMode: Bool,
             matchRanges: [NSRange],
             currentMatchIndex: Int,
-            language: AppLanguage
+            language: AppLanguage,
+            fontSize: CGFloat
         ) {
             self.textView = textView
             self.scrollView = scrollView
@@ -2408,6 +2542,7 @@ private struct HighlightedOutputView: NSViewRepresentable {
             self.matchRanges = matchRanges
             self.currentMatchIndex = currentMatchIndex
             self.language = language
+            self.fontSize = fontSize
         }
 
         func resetVirtualizedRendering(scrollView: NSScrollView) {
@@ -2457,12 +2592,12 @@ private struct HighlightedOutputView: NSViewRepresentable {
             if chunkStartIndex == 0 {
                 textView.string = prefix + chunk
                 textView.textColor = .labelColor
-                textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+                textView.font = AppTheme.editorFont(size: fontSize)
             } else {
                 textView.textStorage?.append(NSAttributedString(
                     string: prefix + chunk,
                     attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+                        .font: AppTheme.editorFont(size: fontSize),
                         .foregroundColor: NSColor.labelColor
                     ]
                 ))
@@ -2861,10 +2996,11 @@ private enum OutputRenderingPolicy {
 private func buildHighlightedJSONText(
     _ text: String,
     isDarkMode: Bool,
+    fontSize: CGFloat,
     matchRanges: [NSRange],
     currentMatchIndex: Int
 ) -> NSAttributedString {
-    let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    let font = AppTheme.editorFont(size: fontSize)
     let attributedText = NSMutableAttributedString(
         string: text,
         attributes: [
