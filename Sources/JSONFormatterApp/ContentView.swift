@@ -116,11 +116,9 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             sidebarView()
-                .frame(
-                    minWidth: isSidebarCollapsed ? 64 : 230,
-                    idealWidth: isSidebarCollapsed ? 72 : 260,
-                    maxWidth: isSidebarCollapsed ? 82 : 300
-                )
+                // 侧边栏使用固定宽度，避免 HSplitView 记忆分隔条位置导致
+                // 首次进入与「收起→再展开」后的宽度不一致；统一以设计稿 260 为基准。
+                .frame(width: isSidebarCollapsed ? 72 : 260)
 
             mainEditorView()
                 .frame(minWidth: 720, maxWidth: .infinity, maxHeight: .infinity)
