@@ -323,7 +323,7 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 isClearHistoryConfirmationPresented = true

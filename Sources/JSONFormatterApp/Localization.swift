@@ -232,7 +232,7 @@ struct L10n {
         .format: ("格式化", "Format"),
         .formatting: ("处理中...", "Formatting..."),
         .compress: ("压缩", "Compress"),
-        .jsonDiff: ("JSON Diff", "JSON Diff"),
+        .jsonDiff: ("Diff", "Diff"),
         .escape: ("转义", "Escape"),
         .escapeAndCopy: ("转义并复制", "Escape & Copy"),
         .copyOutput: ("复制结果", "Copy"),
