@@ -137,12 +137,14 @@ enum LocKey {
     case ignore
 
     // Diff 结果
-    case diffResultTitle
     case diffIdentical
     case diffEmptyHint
     case diffKindAdded
     case diffKindRemoved
     case diffKindChanged
+    case originalJSONTitle
+    case modifiedJSONTitle
+    case copy
 
     // 树视图空态
     case treeEmptyTitle
@@ -336,7 +338,6 @@ struct L10n {
         .formatClipboard: ("格式化剪贴板", "Format Clipboard"),
         .ignore: ("忽略", "Ignore"),
 
-        .diffResultTitle: ("比较结果", "Diff Result"),
         .diffIdentical: (
             "无差异：两个 JSON 的内容相同（对象键顺序已忽略）",
             "No differences: both JSON values are identical (object key order ignored)."
@@ -348,6 +349,9 @@ struct L10n {
         .diffKindAdded: ("新增", "Added"),
         .diffKindRemoved: ("删除", "Removed"),
         .diffKindChanged: ("变更", "Changed"),
+        .originalJSONTitle: ("原始 JSON", "ORIGINAL JSON"),
+        .modifiedJSONTitle: ("修改后 JSON", "MODIFIED JSON"),
+        .copy: ("复制", "Copy"),
 
         .treeEmptyTitle: ("暂无可展示的 JSON 树", "No JSON tree to show"),
         .treeEmptyDescription: ("请先格式化或查询 JSON 输出。", "Format or query JSON output first."),
@@ -365,18 +369,4 @@ struct L10n {
         .actionCopyOutput: ("复制结果", "Copy"),
         .actionCompare: ("比较", "Compare"),
     ]
-}
-
-/// Diff 差异类型的本地化标题。
-extension L10n {
-    func diffKindTitle(_ kind: JSONDifferenceKind) -> String {
-        switch kind {
-        case .added:
-            return t(.diffKindAdded)
-        case .removed:
-            return t(.diffKindRemoved)
-        case .changed:
-            return t(.diffKindChanged)
-        }
-    }
 }

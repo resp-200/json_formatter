@@ -19,6 +19,26 @@ enum AppTheme {
     static let error = color(0xef4444)
     static let onPrimary = Color.white
 
+    // MARK: - Diff 语义高亮（固定色，兼顾亮/暗对比）
+
+    /// 删除行/芯片底色（浅红）。
+    static let diffRemovedBackground = dynamic(light: 0xfee2e2, dark: 0x3f1d1d)
+    /// 删除文案色。
+    static let diffRemovedForeground = dynamic(light: 0x991b1b, dark: 0xfca5a5)
+    /// 新增行/芯片底色（浅绿）。
+    static let diffAddedBackground = dynamic(light: 0xdcfce7, dark: 0x14532d)
+    /// 新增文案色。
+    static let diffAddedForeground = dynamic(light: 0x166534, dark: 0x86efac)
+    /// 变更芯片底色（浅青）。
+    static let diffChangedBackground = dynamic(light: 0xccfbf1, dark: 0x134e4a)
+    /// 变更文案色。
+    static let diffChangedForeground = dynamic(light: 0x0f766e, dark: 0x5eead4)
+
+    /// Diff 编辑器内整行高亮：删除/变更行底色（浅红，NSColor 版供 NSTextView 使用）。
+    static let diffRemovedBackgroundNSColor = dynamicNSColor(light: 0xfee2e2, dark: 0x3f1d1d)
+    /// Diff 编辑器内整行高亮：新增/变更行底色（浅绿，NSColor 版供 NSTextView 使用）。
+    static let diffAddedBackgroundNSColor = dynamicNSColor(light: 0xdcfce7, dark: 0x14532d)
+
     // MARK: - 表层色（随外观自适应）
 
     /// 卡片背景。
