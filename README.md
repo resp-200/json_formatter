@@ -53,6 +53,12 @@ $.items.length
 
 ## Changelog
 
+### JSON Formatter 1.4.0
+
+- Reworked JSON Diff: clicking "Compare" now auto-formats and back-fills both sides, highlighting differences inline with full-line backgrounds — removed/changed lines shown in red on the left, added/changed lines in green on the right.
+- Added difference stat chips in the top bar (removed / added / changed counts) for a quick grasp of the diff size.
+- Removed the separate "Diff Result" list below; difference information is now conveyed entirely through the inline highlights and stat chips for a more focused layout.
+
 ### JSON Formatter 1.3.0
 
 - Redesigned Settings into a centered modal covering language, appearance, editor font size, and auto-save.

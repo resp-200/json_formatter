@@ -33,6 +33,58 @@ public enum JSONFormatterService {
     }
 
     public static func diff(_ leftInput: String, _ rightInput: String) throws -> JSONDiffResult {
+        let (leftObject, rightObject) = try parseDiffInputs(leftInput, rightInput)
+
+        var differences: [JSONDifference] = []
+        try collectDifferences(left: leftObject, right: rightObject, path: "$", into: &differences)
+        return JSONDiffResult(differences: differences)
+    }
+
+    /// Diff 带整行高亮结果：在计算差异的同时，用自定义 pretty-printer 同源产出
+    /// 回填文本与 path→行号映射，避免「JSONSerialization 出文本 + 独立算行号」在
+    /// 中文键排序（UTF-16 vs Unicode）上产生漂移。
+    public static func diffWithLineHighlights(
+        _ leftInput: String,
+        _ rightInput: String
+    ) throws -> JSONDiffHighlightResult {
+        let (leftObject, rightObject) = try parseDiffInputs(leftInput, rightInput)
+
+        var differences: [JSONDifference] = []
+        try collectDifferences(left: leftObject, right: rightObject, path: "$", into: &differences)
+
+        let left = prettyPrintWithLineMap(leftObject)
+        let right = prettyPrintWithLineMap(rightObject)
+
+        var leftLines: Set<Int> = []
+        var rightLines: Set<Int> = []
+        for difference in differences {
+            switch difference.kind {
+            case .removed:
+                addLines(for: difference.path, from: left.lineRanges, into: &leftLines)
+            case .added:
+                addLines(for: difference.path, from: right.lineRanges, into: &rightLines)
+            case .changed:
+                addLines(for: difference.path, from: left.lineRanges, into: &leftLines)
+                addLines(for: difference.path, from: right.lineRanges, into: &rightLines)
+            }
+        }
+
+        logger.info("Diff 整行高亮计算完成，差异 \(differences.count, privacy: .public) 条，左高亮行 \(leftLines.count, privacy: .public)，右高亮行 \(rightLines.count, privacy: .public)")
+
+        return JSONDiffHighlightResult(
+            diff: JSONDiffResult(differences: differences),
+            leftText: left.text,
+            rightText: right.text,
+            leftHighlightedLines: leftLines.sorted(),
+            rightHighlightedLines: rightLines.sorted()
+        )
+    }
+
+    /// 抽取 diff/diffWithLineHighlights 共用的空串校验 + 两侧 plain parse。
+    private static func parseDiffInputs(
+        _ leftInput: String,
+        _ rightInput: String
+    ) throws -> (Any, Any) {
         guard !leftInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw JSONDiffError.invalidLeftJSON("内容为空")
         }
@@ -54,9 +106,86 @@ public enum JSONFormatterService {
             throw JSONDiffError.invalidRightJSON(error.localizedDescription)
         }
 
-        var differences: [JSONDifference] = []
-        try collectDifferences(left: leftObject, right: rightObject, path: "$", into: &differences)
-        return JSONDiffResult(differences: differences)
+        return (leftObject, rightObject)
+    }
+
+    /// 把某个 path 覆盖的所有行号（0-based，ClosedRange 内全部）并入集合。
+    private static func addLines(
+        for path: String,
+        from lineRanges: [String: ClosedRange<Int>],
+        into lines: inout Set<Int>
+    ) {
+        guard let range = lineRanges[path] else {
+            return
+        }
+        for line in range {
+            lines.insert(line)
+        }
+    }
+
+    /// 自定义 pretty-printer：递归发射与 JSONSerialization pretty 视觉一致的文本，
+    /// 同时维护 path→行号映射（0-based，start...end 闭区间包含节点起止行）。
+    /// path 生成规则与 collectDifferences 完全一致（根为 "$"，对象用
+    /// jsonPath(_:appendingKey:)，数组用 "\(path)[\(index)]"），保证零漂移。
+    private static func prettyPrintWithLineMap(
+        _ value: Any
+    ) -> (text: String, lineRanges: [String: ClosedRange<Int>]) {
+        var text = ""
+        var currentLine = 0
+        var lineRanges: [String: ClosedRange<Int>] = [:]
+
+        func emit(_ fragment: String) {
+            for character in fragment where character == "\n" {
+                currentLine += 1
+            }
+            text += fragment
+        }
+
+        func scalarText(_ scalar: Any) -> String {
+            (try? serialize(scalar, options: [.fragmentsAllowed])) ?? "null"
+        }
+
+        func render(_ node: Any, path: String, indent: Int) {
+            let startLine = currentLine
+            let pad = String(repeating: " ", count: indent * 2)
+            let childPad = String(repeating: " ", count: (indent + 1) * 2)
+
+            if let dictionary = stringKeyedDictionary(node) {
+                if dictionary.isEmpty {
+                    emit("{}")
+                } else {
+                    emit("{\n")
+                    let keys = dictionary.keys.sorted()
+                    for (index, key) in keys.enumerated() {
+                        let childPath = jsonPath(path, appendingKey: key)
+                        emit(childPad + scalarText(key) + " : ")
+                        render(dictionary[key] as Any, path: childPath, indent: indent + 1)
+                        emit(index == keys.count - 1 ? "\n" : ",\n")
+                    }
+                    emit(pad + "}")
+                }
+            } else if let array = jsonArray(node) {
+                if array.isEmpty {
+                    emit("[]")
+                } else {
+                    emit("[\n")
+                    for (index, element) in array.enumerated() {
+                        let childPath = "\(path)[\(index)]"
+                        emit(childPad)
+                        render(element, path: childPath, indent: indent + 1)
+                        emit(index == array.count - 1 ? "\n" : ",\n")
+                    }
+                    emit(pad + "]")
+                }
+            } else {
+                emit(scalarText(node))
+            }
+
+            lineRanges[path] = startLine...currentLine
+        }
+
+        render(value, path: "$", indent: 0)
+        return (text, lineRanges)
     }
 
     private static func transform(_ input: String, options: JSONSerialization.WritingOptions) throws -> String {
@@ -357,11 +486,34 @@ public enum JSONFormatterService {
     }
 }
 
+public struct JSONDiffHighlightResult: Equatable, Sendable {
+    public let diff: JSONDiffResult
+    public let leftText: String
+    public let rightText: String
+    public let leftHighlightedLines: [Int]
+    public let rightHighlightedLines: [Int]
+}
+
 public struct JSONDiffResult: Equatable, Sendable {
     public let differences: [JSONDifference]
 
     public var isIdentical: Bool {
         differences.isEmpty
+    }
+
+    /// 新增路径数量，供 Diff 顶栏统计芯片展示。
+    public var addedCount: Int {
+        differences.lazy.filter { $0.kind == .added }.count
+    }
+
+    /// 删除路径数量，供 Diff 顶栏统计芯片展示。
+    public var removedCount: Int {
+        differences.lazy.filter { $0.kind == .removed }.count
+    }
+
+    /// 变更路径数量，供 Diff 顶栏统计芯片展示。
+    public var changedCount: Int {
+        differences.lazy.filter { $0.kind == .changed }.count
     }
 }
 

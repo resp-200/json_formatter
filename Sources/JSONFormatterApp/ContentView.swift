@@ -47,6 +47,14 @@ struct ContentView: View {
     @State private var editingOriginalPageTitle = ""
     @State private var didLoadPersistedWorkspace = false
     @State private var isLoadingPageSnapshot = false
+    // Diff 整行高亮：0-based 行号集合（左删除/变更、右新增/变更）。
+    @State private var diffLeftHighlightLines: [Int] = []
+    @State private var diffRightHighlightLines: [Int] = []
+    // 记录对比时自动回填两侧的文本，用于区分「用户手动编辑」与「程序回填」，避免误清高亮。
+    @State private var lastFormattedLeft = ""
+    @State private var lastFormattedRight = ""
+    // 对比回填期间置真，抑制 onChange 中的清理逻辑（相等性守卫为主，此为辅助）。
+    @State private var isApplyingDiffFormatting = false
 
     @FocusState private var isSearchFocused: Bool
     @FocusState private var focusedEditingPageID: UUID?
@@ -60,6 +68,21 @@ struct ContentView: View {
 
     private var l10n: L10n {
         L10n(language: language)
+    }
+
+    /// Diff 整行高亮策略常量。回填文本过大时跳过上色，避免 NSTextView 属性重算卡顿。
+    private enum DiffHighlightPolicy {
+        static let maxBytes = 300_000
+    }
+
+    /// 左侧编辑器整行高亮（删除/变更 → 浅红）。
+    private var diffLeftLineHighlights: [EditorLineHighlight] {
+        diffLeftHighlightLines.map { EditorLineHighlight(line: $0, background: AppTheme.diffRemovedBackgroundNSColor) }
+    }
+
+    /// 右侧编辑器整行高亮（新增/变更 → 浅绿）。
+    private var diffRightLineHighlights: [EditorLineHighlight] {
+        diffRightHighlightLines.map { EditorLineHighlight(line: $0, background: AppTheme.diffAddedBackgroundNSColor) }
     }
 
     /// 当前外观模式。老用户从未写过新键（空串）时回退用旧 `legacyIsDarkMode` 推导，
@@ -195,14 +218,21 @@ struct ContentView: View {
         }
         .onChange(of: inputText) { _, _ in
             invalidateActiveTransform()
-            if workspaceMode == .diff {
+            // 程序回填不视为编辑（相等性守卫为主，isApplyingDiffFormatting 为辅）。
+            if !isApplyingDiffFormatting, workspaceMode == .diff, inputText != lastFormattedLeft {
                 diffResult = nil
+                diffLeftHighlightLines = []
+                diffRightHighlightLines = []
             }
             updateCurrentPageForTextEditing()
         }
         .onChange(of: diffRightText) { _, _ in
             invalidateActiveTransform()
-            diffResult = nil
+            if !isApplyingDiffFormatting, diffRightText != lastFormattedRight {
+                diffResult = nil
+                diffLeftHighlightLines = []
+                diffRightHighlightLines = []
+            }
             updateCurrentPageForTextEditing()
         }
         .onChange(of: workspaceMode) { _, _ in
@@ -644,16 +674,43 @@ struct ContentView: View {
                     .frame(maxHeight: .infinity)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .top, spacing: 16) {
-                            editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) { EmptyView() }
-                                .frame(minWidth: 180)
-                            editor(title: l10n.t(.outputTitle), text: $diffRightText, showLineNumbers: false) { EmptyView() }
-                                .frame(minWidth: 180)
+                        diffSummaryBar()
+
+                        HStack(alignment: .center, spacing: 12) {
+                            editor(
+                                title: l10n.t(.originalJSONTitle),
+                                text: $inputText,
+                                showLineNumbers: false,
+                                lineHighlights: diffLeftLineHighlights,
+                                trailingActionTitle: l10n.t(.copy)
+                            ) {
+                                copyToPasteboard(inputText, actionName: l10n.t(.copy))
+                            } footer: {
+                                EmptyView()
+                            }
+                            .frame(minWidth: 180)
+
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(AppTheme.outline)
+                                .frame(width: 36, height: 36)
+                                .background(AppTheme.surfaceContainerHigh)
+                                .clipShape(Circle())
+
+                            editor(
+                                title: l10n.t(.modifiedJSONTitle),
+                                text: $diffRightText,
+                                showLineNumbers: false,
+                                lineHighlights: diffRightLineHighlights,
+                                trailingActionTitle: l10n.t(.copy)
+                            ) {
+                                copyToPasteboard(diffRightText, actionName: l10n.t(.copy))
+                            } footer: {
+                                EmptyView()
+                            }
+                            .frame(minWidth: 180)
                         }
                         .frame(maxHeight: .infinity)
-
-                        diffResultView()
-                            .frame(minHeight: 150, idealHeight: 190, maxHeight: 230)
                     }
                     .frame(maxHeight: .infinity)
                 }
@@ -926,62 +983,80 @@ struct ContentView: View {
         .help(l10n.t(.more))
     }
 
+    /// Diff 顶栏：差异统计芯片 + 模式说明，对齐设计稿 info bar。
     @ViewBuilder
-    private func diffResultView() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(l10n.t(.diffResultTitle))
-                .font(.headline)
-                .foregroundStyle(AppTheme.onSurface)
-
+    private func diffSummaryBar() -> some View {
+        HStack(spacing: 12) {
             if let diffResult {
                 if diffResult.isIdentical {
                     Label(l10n.t(.diffIdentical), systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(AppTheme.stringValue)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.diffAddedForeground)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(AppTheme.diffAddedBackground)
+                        .clipShape(Capsule())
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(diffResult.differences) { difference in
-                                differenceRow(difference)
-                            }
+                    HStack(spacing: 8) {
+                        diffStatChip(
+                            prefix: "-",
+                            count: diffResult.removedCount,
+                            label: l10n.t(.diffKindRemoved),
+                            foreground: AppTheme.diffRemovedForeground,
+                            background: AppTheme.diffRemovedBackground
+                        )
+                        diffStatChip(
+                            prefix: "+",
+                            count: diffResult.addedCount,
+                            label: l10n.t(.diffKindAdded),
+                            foreground: AppTheme.diffAddedForeground,
+                            background: AppTheme.diffAddedBackground
+                        )
+                        if diffResult.changedCount > 0 {
+                            diffStatChip(
+                                prefix: "~",
+                                count: diffResult.changedCount,
+                                label: l10n.t(.diffKindChanged),
+                                foreground: AppTheme.diffChangedForeground,
+                                background: AppTheme.diffChangedBackground
+                            )
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             } else {
                 Text(l10n.t(.diffEmptyHint))
+                    .font(.caption)
                     .foregroundStyle(AppTheme.onSurfaceVariant)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .lineLimit(2)
             }
+
+            Spacer(minLength: 8)
         }
-        .padding(12)
-        .background(AppTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.outlineVariant, lineWidth: 1))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
     }
 
-    private func differenceRow(_ difference: JSONDifference) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(l10n.diffKindTitle(difference.kind))
-                    .font(.caption.bold())
-                    .foregroundStyle(difference.kind.color)
-                Text(difference.path)
-                    .font(.system(.body, design: .monospaced).bold())
-                    .textSelection(.enabled)
-            }
-            if let oldValue = difference.oldValue {
-                Text(language == .cn ? "旧值：\(oldValue)" : "Old: \(oldValue)")
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-            }
-            if let newValue = difference.newValue {
-                Text(language == .cn ? "新值：\(newValue)" : "New: \(newValue)")
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-            }
+    private func diffStatChip(
+        prefix: String,
+        count: Int,
+        label: String,
+        foreground: Color,
+        background: Color
+    ) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(foreground)
+                .frame(width: 6, height: 6)
+            Text("\(prefix)\(count) \(label)")
+                .font(.system(size: 11, weight: .bold))
+                .textCase(.uppercase)
+                .tracking(0.4)
         }
-        .padding(.vertical, 4)
+        .foregroundStyle(foreground)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(background)
+        .clipShape(Capsule())
     }
 
     private func initializePageSelectionIfNeeded() {
@@ -1293,6 +1368,12 @@ struct ContentView: View {
         workspaceMode = page.snapshot.workspaceMode
         diffRightText = page.snapshot.diffRightText
         diffResult = nil
+        // 切页必须显式清 Diff 高亮态：onChange 在跨页文本恰好相同（如两页 diffRightText 均为空）
+        // 时不会触发，仅靠副作用清理会把上一页的高亮残留涂到新页文本上。
+        diffLeftHighlightLines = []
+        diffRightHighlightLines = []
+        lastFormattedLeft = ""
+        lastFormattedRight = ""
         errorMessage = page.snapshot.errorMessage
         queryExpression = page.snapshot.queryExpression
         searchQuery = page.snapshot.searchQuery
@@ -1404,24 +1485,33 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    /// 输入卡片：标题栏「INPUT」+ Paste + 内容 + 底部 footer（JS 查询迷你控制台）。
+    /// 输入卡片：标题栏 + 右侧动作（默认 Paste）+ 内容 + 底部 footer（JS 查询迷你控制台）。
     private func editor<Footer: View>(
         title: String,
         text: Binding<String>,
         showLineNumbers: Bool,
+        lineHighlights: [EditorLineHighlight] = [],
+        trailingActionTitle: String? = nil,
+        trailingAction: (() -> Void)? = nil,
         @ViewBuilder footer: () -> Footer
     ) -> some View {
-        VStack(spacing: 0) {
+        let actionTitle = trailingActionTitle ?? l10n.t(.paste)
+        let actionHandler = trailingAction ?? {
+            pasteIntoInput(text)
+        }
+
+        return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .kerning(0.5)
+                    .textCase(.uppercase)
                     .foregroundStyle(AppTheme.onSurfaceVariant)
 
                 Spacer()
 
-                Button(l10n.t(.paste)) {
-                    pasteIntoInput(text)
+                Button(actionTitle) {
+                    actionHandler()
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .semibold))
@@ -1433,7 +1523,7 @@ struct ContentView: View {
 
             Divider()
 
-            AutoPairingTextEditor(text: text, fontSize: CGFloat(editorFontSize))
+            AutoPairingTextEditor(text: text, fontSize: CGFloat(editorFontSize), lineHighlights: lineHighlights)
                 .background(AppTheme.surface)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -1669,7 +1759,7 @@ struct ContentView: View {
 
         Task.detached(priority: .userInitiated) {
             let result = Result {
-                try JSONFormatterService.diff(leftInput, rightInput)
+                try JSONFormatterService.diffWithLineHighlights(leftInput, rightInput)
             }
 
             await MainActor.run {
@@ -1681,10 +1771,30 @@ struct ContentView: View {
                 isTransforming = false
                 activeTransformID = nil
                 switch result {
-                case .success(let result):
-                    diffResult = result
-                    logger.info("JSON Diff 成功，差异数量 \(result.differences.count, privacy: .public)")
+                case .success(let highlight):
+                    // 回填两侧格式化文本并上色。isApplyingDiffFormatting + lastFormatted*
+                    // 双保险，确保回填触发的 onChange 不清掉刚计算出的高亮。
+                    isApplyingDiffFormatting = true
+                    lastFormattedLeft = highlight.leftText
+                    lastFormattedRight = highlight.rightText
+                    inputText = highlight.leftText
+                    diffRightText = highlight.rightText
+                    diffResult = highlight.diff
+                    let totalBytes = highlight.leftText.utf8.count + highlight.rightText.utf8.count
+                    if totalBytes <= DiffHighlightPolicy.maxBytes {
+                        diffLeftHighlightLines = highlight.leftHighlightedLines
+                        diffRightHighlightLines = highlight.rightHighlightedLines
+                    } else {
+                        diffLeftHighlightLines = []
+                        diffRightHighlightLines = []
+                        logger.info("JSON Diff 回填文本过大，跳过整行高亮，字节数 \(totalBytes, privacy: .public)")
+                    }
+                    isApplyingDiffFormatting = false
+                    logger.info("JSON Diff 成功，差异数量 \(highlight.diff.differences.count, privacy: .public)，左高亮行 \(diffLeftHighlightLines.count, privacy: .public)，右高亮行 \(diffRightHighlightLines.count, privacy: .public)")
                 case .failure(let error):
+                    diffResult = nil
+                    diffLeftHighlightLines = []
+                    diffRightHighlightLines = []
                     errorMessage = l10n.failure(.actionCompare, detail: error.localizedDescription)
                     logger.error("JSON Diff 失败，错误 \(error.localizedDescription, privacy: .public)")
                 }
@@ -1811,6 +1921,11 @@ struct ContentView: View {
         outputText = ""
         diffRightText = ""
         diffResult = nil
+        // 显式清 Diff 高亮态，避免依赖 onChange 副作用（清空后文本一致时不触发）。
+        diffLeftHighlightLines = []
+        diffRightHighlightLines = []
+        lastFormattedLeft = ""
+        lastFormattedRight = ""
         errorMessage = ""
         searchQuery = ""
         queryExpression = ""
@@ -2018,9 +2133,16 @@ struct ContentView: View {
     }
 }
 
+/// Diff 编辑器内的整行背景高亮描述（0-based 行号 + 背景色）。
+struct EditorLineHighlight: Equatable {
+    let line: Int
+    let background: NSColor
+}
+
 private struct AutoPairingTextEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat = NSFont.systemFontSize
+    var lineHighlights: [EditorLineHighlight] = []
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -2052,6 +2174,8 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         textView.setPlainJSONInputString(text, fontSize: fontSize)
         context.coordinator.fontSize = fontSize
         context.coordinator.lastFontSize = fontSize
+        applyLineHighlights(textView, lineHighlights)
+        context.coordinator.lastLineHighlights = lineHighlights
 
         scrollView.documentView = textView
         return scrollView
@@ -2071,17 +2195,82 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         // typingAttributes / font，不会重排已存在字符的属性）。
         let fontSizeChanged = context.coordinator.lastFontSize != fontSize
         context.coordinator.lastFontSize = fontSize
-        guard !context.coordinator.isUpdatingFromTextView, textView.string != text || fontSizeChanged else {
+
+        // 文本重设分支：不能用早退 guard 挡住后续的高亮同步，因此仅在此局部条件内重设，
+        // 并记录 textWasReset 供高亮同步判断（重设会清掉旧背景色，必须重涂）。
+        var textWasReset = false
+        if !context.coordinator.isUpdatingFromTextView, textView.string != text || fontSizeChanged {
+            let selectedRanges = textView.selectedRanges
+            textView.setPlainJSONInputString(text, fontSize: fontSize)
+            textView.selectedRanges = clampedSelectionRanges(
+                selectedRanges,
+                preferredInsertionLocation: textView.string.utf16.count,
+                textLength: (text as NSString).length
+            )
+            textWasReset = true
+        }
+
+        if textWasReset || fontSizeChanged || context.coordinator.lastLineHighlights != lineHighlights {
+            applyLineHighlights(textView, lineHighlights)
+            context.coordinator.lastLineHighlights = lineHighlights
+        }
+    }
+
+    /// 对指定 0-based 行号涂整行背景色（不含换行符）。每次先清空全文背景色再重涂，
+    /// 保证高亮撤销/切换时不残留。行号越界跳过。
+    private func applyLineHighlights(_ textView: NSTextView, _ highlights: [EditorLineHighlight]) {
+        guard let textStorage = textView.textStorage else {
             return
         }
 
-        let selectedRanges = textView.selectedRanges
-        textView.setPlainJSONInputString(text, fontSize: fontSize)
-        textView.selectedRanges = clampedSelectionRanges(
-            selectedRanges,
-            preferredInsertionLocation: textView.string.utf16.count,
-            textLength: (text as NSString).length
-        )
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textStorage.removeAttribute(.backgroundColor, range: fullRange)
+
+        guard !highlights.isEmpty else {
+            return
+        }
+
+        let nsString = textView.string as NSString
+        let totalLength = nsString.length
+        for highlight in highlights {
+            guard let lineRange = characterRange(for: highlight.line, in: nsString, totalLength: totalLength) else {
+                continue
+            }
+            textStorage.addAttribute(.backgroundColor, value: highlight.background, range: lineRange)
+        }
+    }
+
+    /// 求某 0-based 行「不含换行符」的字符 range；行号越界返回 nil。
+    private func characterRange(for line: Int, in nsString: NSString, totalLength: Int) -> NSRange? {
+        guard line >= 0 else {
+            return nil
+        }
+
+        var currentLine = 0
+        var location = 0
+        while location <= totalLength {
+            var lineStart = 0
+            var lineEnd = 0
+            var contentsEnd = 0
+            nsString.getLineStart(
+                &lineStart,
+                end: &lineEnd,
+                contentsEnd: &contentsEnd,
+                for: NSRange(location: location, length: 0)
+            )
+
+            if currentLine == line {
+                return NSRange(location: lineStart, length: contentsEnd - lineStart)
+            }
+
+            // 已到末行且未命中，说明行号越界。
+            if lineEnd == location || lineEnd > totalLength {
+                return nil
+            }
+            location = lineEnd
+            currentLine += 1
+        }
+        return nil
     }
 
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate, AutoPairingTextViewDelegate {
@@ -2089,6 +2278,7 @@ private struct AutoPairingTextEditor: NSViewRepresentable {
         var isUpdatingFromTextView = false
         var fontSize: CGFloat = NSFont.systemFontSize
         var lastFontSize: CGFloat = NSFont.systemFontSize
+        var lastLineHighlights: [EditorLineHighlight] = []
 
         init(text: Binding<String>) {
             self.text = text
@@ -2696,19 +2886,6 @@ private enum WorkspaceMode: String, CaseIterable, Identifiable {
             return l10n.language == .cn
                 ? "左右输入两份 JSON 后按 Cmd+Enter 比较；对象键顺序会忽略，数组顺序仍参与比较，所有数据仅在本地处理。"
                 : "Enter two JSON values and press Cmd+Enter to compare; object key order is ignored, array order still counts, all processing stays local."
-        }
-    }
-}
-
-private extension JSONDifferenceKind {
-    var color: Color {
-        switch self {
-        case .added:
-            return AppTheme.stringValue
-        case .removed:
-            return AppTheme.error
-        case .changed:
-            return AppTheme.accent
         }
     }
 }
