@@ -39,6 +39,16 @@ struct ContentView: View {
     @State private var latestReleaseInfo: LatestReleaseInfo?
     @State private var keyDownMonitor: Any?
     @AppStorage("jsonFormatterIsSidebarCollapsed") private var isSidebarCollapsed = false
+    /// 侧边栏展开态宽度（pt）。收起态固定 72，不改写此值；双击分界恢复默认 260。
+    @AppStorage("jsonFormatterSidebarWidth") private var sidebarWidth = 260.0
+    /// 格式化模式输入/输出左栏占比；两侧各 ≥ 180，双击分界恢复 0.5。
+    @AppStorage("jsonFormatterEditorSplitRatio") private var editorSplitRatio = 0.5
+    /// Diff 模式左右编辑器左栏占比；规则同 editorSplitRatio。
+    @AppStorage("jsonFormatterDiffSplitRatio") private var diffSplitRatio = 0.5
+    /// 侧栏拖动中的实时宽度：拖动过程只改本地态，松手再写 @AppStorage，避免每帧落盘。
+    @State private var sidebarLiveWidth: Double?
+    /// 侧栏拖动起点宽度：手势累计位移需相对起点计算，避免每帧叠加当前值导致失控。
+    @State private var sidebarDragOriginWidth: Double?
     @State private var pages: [JSONWorkspacePage] = [.initial]
     @State private var selectedPageID: UUID?
     @State private var nextPageNumber = 2
@@ -73,6 +83,17 @@ struct ContentView: View {
     /// Diff 整行高亮策略常量。回填文本过大时跳过上色，避免 NSTextView 属性重算卡顿。
     private enum DiffHighlightPolicy {
         static let maxBytes = 300_000
+    }
+
+    /// 可拖分栏尺寸约束：侧栏绝对宽、编辑区两侧最小宽、分隔条命中宽。
+    private enum PaneLayoutMetrics {
+        static let sidebarCollapsedWidth: CGFloat = 72
+        static let sidebarDefaultWidth: Double = 260
+        static let sidebarMinWidth: Double = 180
+        static let sidebarMaxWidth: Double = 420
+        static let editorPaneMinWidth: CGFloat = 180
+        static let defaultSplitRatio: Double = 0.5
+        static let splitterHitWidth: CGFloat = 10
     }
 
     /// 左侧编辑器整行高亮（删除/变更 → 浅红）。
@@ -179,16 +200,43 @@ struct ContentView: View {
     }
 
     var body: some View {
-        HSplitView {
+        // 自定义 HStack + 显式宽度，不用 HSplitView 系统记忆（与侧栏折叠语义冲突）。
+        // 展开态可拖宽并持久化；收起态固定 icon rail，不改写 sidebarWidth。
+        HStack(spacing: 0) {
             sidebarView()
-                // 侧边栏使用固定宽度，避免 HSplitView 记忆分隔条位置导致
-                // 首次进入与「收起→再展开」后的宽度不一致；统一以设计稿 260 为基准。
-                .frame(width: isSidebarCollapsed ? 72 : 260)
+                .frame(
+                    width: isSidebarCollapsed
+                        ? PaneLayoutMetrics.sidebarCollapsedWidth
+                        : CGFloat(displayedSidebarWidth)
+                )
+
+            if isSidebarCollapsed {
+                Rectangle()
+                    .fill(AppTheme.outlineVariant)
+                    .frame(width: 1)
+                    .frame(maxHeight: .infinity)
+            } else {
+                SplitterHandle(
+                    onDragChanged: { translationX in
+                        applySidebarDrag(translationFromStartX: translationX)
+                    },
+                    onDragEnded: {
+                        commitSidebarDrag()
+                    },
+                    onDoubleClick: {
+                        resetSidebarWidthToDefault()
+                    }
+                )
+            }
 
             mainEditorView()
                 // 主区最小宽度收窄，让窗口能真正压缩而不裁切；双编辑卡片各自的
                 // 最小宽度在 mainEditorView 分栏处单独约束，确保窄窗口下不被挤没。
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // 侧栏拖宽不做隐式动画，避免快拖时整页插值晃动。
+        .transaction { transaction in
+            transaction.animation = nil
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.surfaceBright)
@@ -291,11 +339,7 @@ struct ContentView: View {
             }
         }
         .background(AppTheme.surfaceContainerLow)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(AppTheme.outlineVariant)
-                .frame(width: 1)
-        }
+        // 分隔线由外侧 SplitterHandle / 收起态 1pt 线统一绘制，避免双线。
     }
 
     private func expandedSidebarView() -> some View {
@@ -663,53 +707,85 @@ struct ContentView: View {
                 }
 
                 if workspaceMode == .format {
-                    HStack(alignment: .top, spacing: 16) {
-                        editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) {
-                            queryExpressionBar()
+                    HorizontalRatioSplit(
+                        ratio: $editorSplitRatio,
+                        centerColumnWidth: PaneLayoutMetrics.splitterHitWidth,
+                        minPaneWidth: PaneLayoutMetrics.editorPaneMinWidth,
+                        onDragEnded: { ratio in
+                            logger.info(
+                                "编辑区分界拖动结束，键 jsonFormatterEditorSplitRatio，当前比例 \(ratio, privacy: .public)"
+                            )
+                        },
+                        onDoubleClickReset: { ratio in
+                            logger.info(
+                                "双击编辑区分界恢复默认比例，键 jsonFormatterEditorSplitRatio，比例 \(ratio, privacy: .public)"
+                            )
+                        },
+                        left: {
+                            editor(title: l10n.t(.inputTitle), text: $inputText, showLineNumbers: false) {
+                                queryExpressionBar()
+                            }
+                        },
+                        right: {
+                            outputEditor(title: l10n.t(.outputTitle))
                         }
-                        .frame(minWidth: 180)
-                        outputEditor(title: l10n.t(.outputTitle))
-                            .frame(minWidth: 180)
-                    }
+                    )
                     .frame(maxHeight: .infinity)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
                         diffSummaryBar()
 
-                        HStack(alignment: .center, spacing: 12) {
-                            editor(
-                                title: l10n.t(.originalJSONTitle),
-                                text: $inputText,
-                                showLineNumbers: false,
-                                lineHighlights: diffLeftLineHighlights,
-                                trailingActionTitle: l10n.t(.copy)
-                            ) {
-                                copyToPasteboard(inputText, actionName: l10n.t(.copy))
-                            } footer: {
-                                EmptyView()
+                        HorizontalRatioSplit(
+                            ratio: $diffSplitRatio,
+                            // Diff 中间保留箭头视觉宽度；装饰不接收命中，拖动落在分隔条上。
+                            centerColumnWidth: 36,
+                            minPaneWidth: PaneLayoutMetrics.editorPaneMinWidth,
+                            onDragEnded: { ratio in
+                                logger.info(
+                                    "编辑区分界拖动结束，键 jsonFormatterDiffSplitRatio，当前比例 \(ratio, privacy: .public)"
+                                )
+                            },
+                            onDoubleClickReset: { ratio in
+                                logger.info(
+                                    "双击编辑区分界恢复默认比例，键 jsonFormatterDiffSplitRatio，比例 \(ratio, privacy: .public)"
+                                )
+                            },
+                            centerOverlay: {
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(AppTheme.outline)
+                                    .frame(width: 36, height: 36)
+                                    .background(AppTheme.surfaceContainerHigh)
+                                    .clipShape(Circle())
+                                    .allowsHitTesting(false)
+                            },
+                            left: {
+                                editor(
+                                    title: l10n.t(.originalJSONTitle),
+                                    text: $inputText,
+                                    showLineNumbers: false,
+                                    lineHighlights: diffLeftLineHighlights,
+                                    trailingActionTitle: l10n.t(.copy)
+                                ) {
+                                    copyToPasteboard(inputText, actionName: l10n.t(.copy))
+                                } footer: {
+                                    EmptyView()
+                                }
+                            },
+                            right: {
+                                editor(
+                                    title: l10n.t(.modifiedJSONTitle),
+                                    text: $diffRightText,
+                                    showLineNumbers: false,
+                                    lineHighlights: diffRightLineHighlights,
+                                    trailingActionTitle: l10n.t(.copy)
+                                ) {
+                                    copyToPasteboard(diffRightText, actionName: l10n.t(.copy))
+                                } footer: {
+                                    EmptyView()
+                                }
                             }
-                            .frame(minWidth: 180)
-
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(AppTheme.outline)
-                                .frame(width: 36, height: 36)
-                                .background(AppTheme.surfaceContainerHigh)
-                                .clipShape(Circle())
-
-                            editor(
-                                title: l10n.t(.modifiedJSONTitle),
-                                text: $diffRightText,
-                                showLineNumbers: false,
-                                lineHighlights: diffRightLineHighlights,
-                                trailingActionTitle: l10n.t(.copy)
-                            ) {
-                                copyToPasteboard(diffRightText, actionName: l10n.t(.copy))
-                            } footer: {
-                                EmptyView()
-                            }
-                            .frame(minWidth: 180)
-                        }
+                        )
                         .frame(maxHeight: .infinity)
                     }
                     .frame(maxHeight: .infinity)
@@ -1128,8 +1204,58 @@ struct ContentView: View {
     }
 
     private func toggleSidebarCollapsed() {
+        // 折叠时丢弃未提交的拖动预览，避免再展开时闪一下 live 宽度。
+        sidebarLiveWidth = nil
+        sidebarDragOriginWidth = nil
         isSidebarCollapsed.toggle()
-        logger.info("切换 JSON 页面侧边栏状态，当前为 \(isSidebarCollapsed ? "收起" : "展开", privacy: .public)")
+        logger.info(
+            "切换 JSON 页面侧边栏状态，当前为 \(isSidebarCollapsed ? "收起" : "展开", privacy: .public)，记忆展开宽度 \(clampedSidebarWidth, privacy: .public)"
+        )
+    }
+
+    /// 展开态侧栏宽度，始终 clamp 到 [180, 420]，防止异常持久化值破坏布局。
+    private var clampedSidebarWidth: Double {
+        min(max(sidebarWidth, PaneLayoutMetrics.sidebarMinWidth), PaneLayoutMetrics.sidebarMaxWidth)
+    }
+
+    /// 侧栏展示宽度：拖动中用 live 预览，松手后回落到持久化值。
+    private var displayedSidebarWidth: Double {
+        if let sidebarLiveWidth {
+            return min(max(sidebarLiveWidth, PaneLayoutMetrics.sidebarMinWidth), PaneLayoutMetrics.sidebarMaxWidth)
+        }
+        return clampedSidebarWidth
+    }
+
+    /// `translationFromStartX` 为相对本轮拖动手势起点的累计位移；仅更新 live 宽度，不写 @AppStorage。
+    /// 结果取整到像素，避免侧栏拖动时亚像素跳动。
+    private func applySidebarDrag(translationFromStartX: CGFloat) {
+        if sidebarDragOriginWidth == nil {
+            sidebarDragOriginWidth = displayedSidebarWidth
+        }
+        let origin = sidebarDragOriginWidth ?? displayedSidebarWidth
+        let next = (origin + Double(translationFromStartX)).rounded()
+        sidebarLiveWidth = min(max(next, PaneLayoutMetrics.sidebarMinWidth), PaneLayoutMetrics.sidebarMaxWidth)
+    }
+
+    /// 拖动结束：将 live 宽度一次写入 @AppStorage 并清理手势状态。
+    private func commitSidebarDrag() {
+        if let sidebarLiveWidth {
+            sidebarWidth = min(max(sidebarLiveWidth, PaneLayoutMetrics.sidebarMinWidth), PaneLayoutMetrics.sidebarMaxWidth)
+        }
+        sidebarLiveWidth = nil
+        sidebarDragOriginWidth = nil
+        logger.info(
+            "侧边栏宽度拖动结束，当前宽度 \(clampedSidebarWidth, privacy: .public)"
+        )
+    }
+
+    private func resetSidebarWidthToDefault() {
+        sidebarDragOriginWidth = nil
+        sidebarLiveWidth = nil
+        sidebarWidth = PaneLayoutMetrics.sidebarDefaultWidth
+        logger.info(
+            "双击侧边栏分界线恢复默认宽度，当前宽度 \(PaneLayoutMetrics.sidebarDefaultWidth, privacy: .public)"
+        )
     }
 
     private func beginPageTitleEditing(_ page: JSONWorkspacePage) {
@@ -2130,6 +2256,332 @@ struct ContentView: View {
 
         NSEvent.removeMonitor(keyDownMonitor)
         self.keyDownMonitor = nil
+    }
+}
+
+/// 水平可拖分界：1pt 视觉线 + 加宽命中区；hover 切换左右拉伸光标；支持拖动与双击复位。
+///
+/// 手势**必须**使用不随分隔条移动的坐标系（`.global`）。
+/// 若用 `.local`，分隔条随布局右移时 local 原点也右移，translation 会反馈振荡，
+/// 表现为快拖时中间线与两侧内容一起左右晃。
+private struct SplitterHandle: View {
+    var hitWidth: CGFloat = 10
+    /// 相对本轮手势起点的水平位移（global 坐标系，单位 pt）。
+    let onDragChanged: (CGFloat) -> Void
+    var onDragEnded: (() -> Void)? = nil
+    let onDoubleClick: () -> Void
+
+    /// 本轮是否已进入真正拖动（位移超过阈值）。
+    @State private var didDragBeyondClickThreshold = false
+    /// 上一次「短点击」结束时间，用于在 DragGesture 内识别双击（highPriority 拖动会吞掉 onTapGesture）。
+    @State private var lastShortClickEndedAt: Date?
+
+    var body: some View {
+        ZStack {
+            Color.clear
+                .frame(width: hitWidth)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+
+            Rectangle()
+                .fill(AppTheme.outlineVariant)
+                .frame(width: 1)
+                .frame(maxHeight: .infinity)
+        }
+        .frame(width: hitWidth)
+        .frame(maxHeight: .infinity)
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        // highPriorityGesture 保证分隔条优先吃到拖动；双击在拖动手势内用时间窗识别。
+        // coordinateSpace 必须用 .global：分隔条会随左栏变宽而移动，.local 会让 translation 自激振荡。
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    // 用 location - startLocation 而非 translation 字段，语义更明确且与 global 一致。
+                    let deltaX = value.location.x - value.startLocation.x
+                    let deltaY = value.location.y - value.startLocation.y
+                    let distance = hypot(deltaX, deltaY)
+                    if distance >= 2 {
+                        didDragBeyondClickThreshold = true
+                        onDragChanged(deltaX)
+                    }
+                }
+                .onEnded { value in
+                    let deltaX = value.location.x - value.startLocation.x
+                    let deltaY = value.location.y - value.startLocation.y
+                    let distance = hypot(deltaX, deltaY)
+                    let wasDragging = didDragBeyondClickThreshold || distance >= 2
+                    didDragBeyondClickThreshold = false
+
+                    if wasDragging {
+                        lastShortClickEndedAt = nil
+                        onDragEnded?()
+                        return
+                    }
+
+                    // 短点击：若与上一次短点击间隔在系统双击时限内，视为双击复位。
+                    let now = Date()
+                    let doubleClickLimit = NSEvent.doubleClickInterval
+                    if let lastShortClickEndedAt,
+                       now.timeIntervalSince(lastShortClickEndedAt) <= doubleClickLimit {
+                        self.lastShortClickEndedAt = nil
+                        onDoubleClick()
+                    } else {
+                        lastShortClickEndedAt = now
+                    }
+                }
+        )
+    }
+}
+
+/// 按左栏占比驱动的水平分栏：命名坐标系 + 绝对定位分隔条。
+/// 拖动时用 global 位移更新整像素左宽；松手再写 ratio。避免 .local 手势反馈导致线/内容晃动。
+private struct HorizontalRatioSplit<Left: View, Right: View, Overlay: View>: View {
+    @Binding var ratio: Double
+    var centerColumnWidth: CGFloat
+    var minPaneWidth: CGFloat
+    var defaultRatio: Double = 0.5
+    var onDragEnded: ((Double) -> Void)? = nil
+    var onDoubleClickReset: ((Double) -> Void)? = nil
+    @ViewBuilder var centerOverlay: () -> Overlay
+    @ViewBuilder var left: () -> Left
+    @ViewBuilder var right: () -> Right
+
+    /// 本轮拖动起点的左栏宽度（整像素）。
+    @State private var dragOriginLeftWidth: CGFloat?
+    /// 拖动开始时冻结的容器总宽。
+    @State private var frozenTotalWidth: CGFloat?
+    /// 拖动中的实时左栏绝对宽度（整像素）；nil 表示按持久化 ratio 展示。
+    @State private var liveLeftWidth: CGFloat?
+
+    private let splitCoordinateSpaceName = "jsonFormatterHorizontalSplit"
+
+    init(
+        ratio: Binding<Double>,
+        centerColumnWidth: CGFloat,
+        minPaneWidth: CGFloat,
+        defaultRatio: Double = 0.5,
+        onDragEnded: ((Double) -> Void)? = nil,
+        onDoubleClickReset: ((Double) -> Void)? = nil,
+        @ViewBuilder centerOverlay: @escaping () -> Overlay,
+        @ViewBuilder left: @escaping () -> Left,
+        @ViewBuilder right: @escaping () -> Right
+    ) {
+        self._ratio = ratio
+        self.centerColumnWidth = centerColumnWidth
+        self.minPaneWidth = minPaneWidth
+        self.defaultRatio = defaultRatio
+        self.onDragEnded = onDragEnded
+        self.onDoubleClickReset = onDoubleClickReset
+        self.centerOverlay = centerOverlay
+        self.left = left
+        self.right = right
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let measuredTotal = max(geometry.size.width, 0)
+            let totalWidth = frozenTotalWidth ?? measuredTotal
+            let leftWidth = resolvedLeftWidth(totalWidth: totalWidth)
+            let rightWidth = max(totalWidth - centerColumnWidth - leftWidth, 0)
+            let hitWidth = max(centerColumnWidth, 10)
+
+            // 绝对定位：左右栏 + 浮在 leftWidth 处的分隔条。
+            // 分隔条不作为会回流的 HStack 中轴子项参与宽度协商，减少线身抖动。
+            ZStack(alignment: .topLeading) {
+                HStack(alignment: .top, spacing: 0) {
+                    left()
+                        .frame(width: leftWidth, alignment: .leading)
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+                        // 拖动时屏蔽编辑器命中，避免 NSTextView 与分隔条抢事件造成顿挫。
+                        .allowsHitTesting(liveLeftWidth == nil)
+
+                    Color.clear
+                        .frame(width: centerColumnWidth)
+                        .frame(maxHeight: .infinity)
+
+                    right()
+                        .frame(width: rightWidth, alignment: .leading)
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+                        .allowsHitTesting(liveLeftWidth == nil)
+                }
+                .frame(width: totalWidth, height: geometry.size.height, alignment: .topLeading)
+
+                ZStack {
+                    SplitterHandle(
+                        hitWidth: hitWidth,
+                        onDragChanged: { translationX in
+                            applyDrag(
+                                measuredTotalWidth: measuredTotal,
+                                translationFromStartX: translationX
+                            )
+                        },
+                        onDragEnded: {
+                            commitDrag()
+                        },
+                        onDoubleClick: {
+                            clearDragState()
+                            ratio = defaultRatio
+                            onDoubleClickReset?(defaultRatio)
+                        }
+                    )
+
+                    centerOverlay()
+                        .allowsHitTesting(false)
+                }
+                .frame(width: hitWidth, height: geometry.size.height)
+                // 命中条中心对齐到两栏分界（leftWidth + center/2）。
+                .offset(x: leftWidth + (centerColumnWidth - hitWidth) / 2)
+            }
+            .frame(width: totalWidth, height: geometry.size.height, alignment: .topLeading)
+            .coordinateSpace(name: splitCoordinateSpaceName)
+            // 分栏宽度变化一律不要隐式动画，否则会插值晃动。
+            .transaction { transaction in
+                transaction.animation = nil
+            }
+        }
+    }
+
+    /// 展示用左宽：拖动中用绝对像素，静止时用 ratio 换算并取整。
+    private func resolvedLeftWidth(totalWidth: CGFloat) -> CGFloat {
+        if let liveLeftWidth {
+            return Self.clampedAbsoluteLeftWidth(
+                totalWidth: totalWidth,
+                centerColumnWidth: centerColumnWidth,
+                minPaneWidth: minPaneWidth,
+                proposedLeft: liveLeftWidth
+            )
+        }
+
+        return Self.clampedLeftWidth(
+            totalWidth: totalWidth,
+            centerColumnWidth: centerColumnWidth,
+            minPaneWidth: minPaneWidth,
+            ratio: ratio
+        )
+    }
+
+    private func applyDrag(measuredTotalWidth: CGFloat, translationFromStartX: CGFloat) {
+        // 首次移动时冻结总宽与起点左宽；translation 来自 global，不随分隔条移动而漂移。
+        if frozenTotalWidth == nil {
+            frozenTotalWidth = measuredTotalWidth
+        }
+        let totalWidth = frozenTotalWidth ?? measuredTotalWidth
+        let available = max(totalWidth - centerColumnWidth, 0)
+        guard available > 0 else {
+            return
+        }
+
+        if dragOriginLeftWidth == nil {
+            dragOriginLeftWidth = Self.clampedLeftWidth(
+                totalWidth: totalWidth,
+                centerColumnWidth: centerColumnWidth,
+                minPaneWidth: minPaneWidth,
+                ratio: ratio
+            )
+        }
+
+        let origin = dragOriginLeftWidth ?? 0
+        let proposedLeft = (origin + translationFromStartX).rounded(.toNearestOrAwayFromZero)
+        let nextLeft = Self.clampedAbsoluteLeftWidth(
+            totalWidth: totalWidth,
+            centerColumnWidth: centerColumnWidth,
+            minPaneWidth: minPaneWidth,
+            proposedLeft: proposedLeft
+        )
+        // 同像素不重复写状态，减少无意义刷新。
+        if liveLeftWidth != nextLeft {
+            liveLeftWidth = nextLeft
+        }
+    }
+
+    private func commitDrag() {
+        let totalWidth = frozenTotalWidth
+        let available = max((totalWidth ?? 0) - centerColumnWidth, 0)
+        if let liveLeftWidth, available > 0 {
+            let nextRatio = Double(liveLeftWidth / available)
+            ratio = min(max(nextRatio, 0), 1)
+            onDragEnded?(ratio)
+        }
+        clearDragState()
+    }
+
+    private func clearDragState() {
+        liveLeftWidth = nil
+        dragOriginLeftWidth = nil
+        frozenTotalWidth = nil
+    }
+
+    /// 保证两侧各 ≥ min，并扣除中间栏宽度；结果取整到像素。
+    private static func clampedLeftWidth(
+        totalWidth: CGFloat,
+        centerColumnWidth: CGFloat,
+        minPaneWidth: CGFloat,
+        ratio: Double
+    ) -> CGFloat {
+        let available = max(totalWidth - centerColumnWidth, 0)
+        guard available > 0 else {
+            return 0
+        }
+
+        let proposed = available * CGFloat(min(max(ratio, 0), 1))
+        return clampedAbsoluteLeftWidth(
+            totalWidth: totalWidth,
+            centerColumnWidth: centerColumnWidth,
+            minPaneWidth: minPaneWidth,
+            proposedLeft: proposed
+        )
+    }
+
+    /// 绝对左宽 clamp + 整像素化，避免 0.5pt 级来回跳。
+    private static func clampedAbsoluteLeftWidth(
+        totalWidth: CGFloat,
+        centerColumnWidth: CGFloat,
+        minPaneWidth: CGFloat,
+        proposedLeft: CGFloat
+    ) -> CGFloat {
+        let available = max(totalWidth - centerColumnWidth, 0)
+        guard available > 0 else {
+            return 0
+        }
+
+        // 总宽不足 2*min 时均分可用宽度，避免 clamp 区间倒置。
+        let minLeft = min(minPaneWidth, available / 2)
+        let maxLeft = max(available - minPaneWidth, minLeft)
+        let clamped = min(max(proposedLeft, minLeft), maxLeft)
+        return clamped.rounded(.toNearestOrAwayFromZero)
+    }
+}
+
+extension HorizontalRatioSplit where Overlay == EmptyView {
+    init(
+        ratio: Binding<Double>,
+        centerColumnWidth: CGFloat,
+        minPaneWidth: CGFloat,
+        defaultRatio: Double = 0.5,
+        onDragEnded: ((Double) -> Void)? = nil,
+        onDoubleClickReset: ((Double) -> Void)? = nil,
+        @ViewBuilder left: @escaping () -> Left,
+        @ViewBuilder right: @escaping () -> Right
+    ) {
+        self.init(
+            ratio: ratio,
+            centerColumnWidth: centerColumnWidth,
+            minPaneWidth: minPaneWidth,
+            defaultRatio: defaultRatio,
+            onDragEnded: onDragEnded,
+            onDoubleClickReset: onDoubleClickReset,
+            centerOverlay: { EmptyView() },
+            left: left,
+            right: right
+        )
     }
 }
 

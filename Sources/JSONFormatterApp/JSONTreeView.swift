@@ -144,21 +144,20 @@ private struct JSONTreeNodeRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .center, spacing: 6) {
+            HStack(alignment: .center, spacing: 6) {
                 Color.clear
                     .frame(width: CGFloat(depth) * 18, height: 1)
                     .fixedSize(horizontal: true, vertical: false)
 
-                Button(action: toggleExpansion) {
-                    Image(systemName: node.isExpandable ? (isExpanded ? "chevron.down" : "chevron.right") : "circle.fill")
-                        .font(.system(size: node.isExpandable ? 10 : 4, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(node.isExpandable ? .secondary : .tertiary)
-                        .frame(width: 14, height: 18)
-                }
-                .buttonStyle(.plain)
-                .disabled(!node.isExpandable)
-                .fixedSize(horizontal: true, vertical: false)
+                // chevron 视觉热区约 28×28；展开由整行 onTapGesture 统一处理，
+                // 避免 Button + 父级点击各触发一次导致「点一下开又关」。
+                Image(systemName: node.isExpandable ? (isExpanded ? "chevron.down" : "chevron.right") : "circle.fill")
+                    .font(.system(size: node.isExpandable ? 10 : 4, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(node.isExpandable ? .secondary : .tertiary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+                    .fixedSize(horizontal: true, vertical: false)
 
                 Text(node.label)
                     .font(.system(.body, design: .monospaced).weight(.semibold))
@@ -166,7 +165,6 @@ private struct JSONTreeNodeRow: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(2)
-                    .textSelection(.enabled)
 
                 Text(node.summary)
                     .font(.system(.body, design: .monospaced))
@@ -174,20 +172,21 @@ private struct JSONTreeNodeRow: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(1)
-                    .textSelection(.enabled)
             }
             .fixedSize(horizontal: true, vertical: false)
 
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 0)
         .padding(.horizontal, 4)
         .frame(minWidth: max(minimumRowWidth, 0), alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(rowBackground)
         )
+        // 整行热区：可展开节点单击切换；叶子节点由 toggleExpansion 守护为 no-op。
+        // 可点性优先于文本选择（若拖选与单击冲突，以展开交互为准）。
         .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: toggleExpansion)
+        .onTapGesture(perform: toggleExpansion)
     }
 }
