@@ -53,6 +53,12 @@ $.items.length
 
 ## Changelog
 
+### JSON Formatter 1.5.0
+
+- Enlarged the tree expand/collapse hit target; expandable rows now toggle with a single click.
+- Sidebar expanded width, Format input/output split, and JSON Diff left/right split are all mouse-draggable; widths and ratios persist across restarts.
+- Double-click a splitter to restore the default width or 50/50 ratio; the collapsed sidebar stays a fixed icon rail and is not draggable.
+
 ### JSON Formatter 1.4.0
 
 - Reworked JSON Diff: clicking "Compare" now auto-formats and back-fills both sides, highlighting differences inline with full-line backgrounds — removed/changed lines shown in red on the left, added/changed lines in green on the right.
